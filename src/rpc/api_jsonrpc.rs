@@ -213,12 +213,14 @@ pub fn create_request_processor(
                 let sender = HttpSender::new(rpc_url);
                 let client = RpcClient::new_sender(sender, RpcClientConfig::default());
                 loop {
-                    if let Ok(slot) = client
+                    let value = match client
                         .get_slot_with_commitment(CommitmentConfig::confirmed())
                         .await
                     {
-                        cluster_slot.store(slot, Ordering::Relaxed);
-                    }
+                        Ok(slot) => slot,
+                        Err(_) => 0,
+                    };
+                    cluster_slot.store(value, Ordering::Relaxed);
                     sleep(poll_interval).await;
                 }
             });

@@ -74,7 +74,7 @@ storage:
     # Max number of read requests from files storage, includes: getBlock, getTransaction
     thread_max_files_requests: 32
 rpc:
-  endpoint: 127.0.0.1:9000 # RPC endpoint, implement same JSON-RPC API as Agave
+  endpoint: http://127.0.0.1:8899/ # RPC endpoint, implement same JSON-RPC API as Agave
   # RPC Tokio runtime, used to parse requests, serialize responses
   # tokio:
   #   worker_threads: null # Number of threads in Tokio runtime, by default all available cores
