@@ -42,6 +42,9 @@ use {
     solana_epoch_schedule::EpochSchedule,
     solana_hash::Hash,
     solana_pubkey::Pubkey,
+    solana_rpc_client::{
+        http_sender::HttpSender, nonblocking::rpc_client::RpcClient, rpc_client::RpcClientConfig,
+    },
     solana_rpc_client_api::{
         config::{
             RpcBlockConfig, RpcBlocksConfigWrapper, RpcContextConfig, RpcEncodingConfigWrapper,
@@ -66,7 +69,10 @@ use {
     std::{
         future::Future,
         str::FromStr,
-        sync::Arc,
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
         time::{Duration, Instant},
     },
     tokio::{
@@ -94,6 +100,8 @@ pub struct State {
     db_write_inflation_reward: RocksdbWriteInflationReward,
     upstreams: Vec<RpcClientJsonrpc>,
     workers: Sender<WorkRequest>,
+    cluster_confirmed_slot: Arc<AtomicU64>,
+    health_check_slot_distance: u64,
 }
 
 impl State {
@@ -139,6 +147,8 @@ impl State {
             db_write_inflation_reward,
             upstreams,
             workers,
+            cluster_confirmed_slot: Arc::new(AtomicU64::new(0)),
+            health_check_slot_distance: config.health_check.slot_distance,
         })
     }
 
@@ -193,6 +203,26 @@ pub fn create_request_processor(
             "getFirstAvailableBlock",
             Box::new(RpcRequestFirstAvailableBlock::handle),
         );
+    }
+    if calls.contains(&ConfigRpcCallJson::GetHealth) {
+        processor.add_handler("getHealth", Box::new(RpcRequestHealth::handle));
+        if let Some(rpc_url) = config.health_check.rpc_uri.clone() {
+            let cluster_slot = Arc::clone(&state.cluster_confirmed_slot);
+            let poll_interval = config.health_check.interval;
+            tokio::spawn(async move {
+                let sender = HttpSender::new(rpc_url);
+                let client = RpcClient::new_sender(sender, RpcClientConfig::default());
+                loop {
+                    if let Ok(slot) = client
+                        .get_slot_with_commitment(CommitmentConfig::confirmed())
+                        .await
+                    {
+                        cluster_slot.store(slot, Ordering::Relaxed);
+                    }
+                    sleep(poll_interval).await;
+                }
+            });
+        }
     }
     if calls.contains(&ConfigRpcCallJson::GetInflationReward) {
         processor.add_handler(
@@ -2573,6 +2603,35 @@ impl RpcRequestTransactionWorkRequest {
 }
 
 #[derive(Debug)]
+struct RpcRequestHealth;
+
+impl RpcRequestHandler for RpcRequestHealth {
+    fn parse(
+        state: Arc<State>,
+        _x_subscription_id: Arc<str>,
+        _upstream_disabled: bool,
+        request: Request<'_>,
+    ) -> Result<Self, Vec<u8>> {
+        let request = no_params_expected(request)?;
+        let cluster_slot = state.cluster_confirmed_slot.load(Ordering::Relaxed);
+        if cluster_slot == 0 {
+            return Err(jsonrpc_response_success(request.id, "ok"));
+        }
+        let local_slot = state.stored_slots.confirmed_load();
+        if local_slot >= cluster_slot.saturating_sub(state.health_check_slot_distance) {
+            Err(jsonrpc_response_success(request.id, "ok"))
+        } else {
+            let num_slots_behind = cluster_slot.saturating_sub(local_slot);
+            Err(jsonrpc_response_error_custom(
+                request.id,
+                RpcCustomError::NodeUnhealthy {
+                    num_slots_behind: Some(num_slots_behind),
+                },
+            ))
+        }
+    }
+}
+
 struct RpcRequestVersion;
 
 impl RpcRequestHandler for RpcRequestVersion {

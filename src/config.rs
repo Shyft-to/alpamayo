@@ -352,6 +352,9 @@ pub struct ConfigRpc {
     /// Thread pool to parse / encode data
     #[serde(default)]
     pub workers: ConfigRpcWorkers,
+    /// Health check options for getHealth
+    #[serde(default)]
+    pub health_check: ConfigRpcHealthCheck,
 }
 
 impl ConfigRpc {
@@ -400,6 +403,25 @@ impl ConfigRpc {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ConfigRpcHealthCheck {
+    pub rpc_uri: Option<String>,
+    pub slot_distance: u64,
+    #[serde(with = "humantime_serde")]
+    pub interval: Duration,
+}
+
+impl Default for ConfigRpcHealthCheck {
+    fn default() -> Self {
+        Self {
+            rpc_uri: None,
+            slot_distance: 150,
+            interval: Duration::from_secs(2),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub enum ConfigRpcCallHttpGet {
@@ -417,6 +439,7 @@ pub enum ConfigRpcCallJson {
     GetBlockTime,
     GetClusterNodes,
     GetFirstAvailableBlock,
+    GetHealth,
     GetInflationReward,
     GetLatestBlockhash,
     GetLeaderSchedule,
@@ -439,6 +462,7 @@ impl ConfigRpcCallJson {
             Self::GetBlockTime,
             Self::GetClusterNodes,
             Self::GetFirstAvailableBlock,
+            Self::GetHealth,
             Self::GetInflationReward,
             Self::GetLatestBlockhash,
             Self::GetLeaderSchedule,

@@ -4,3 +4,5 @@ config.dev.yml
 
 # rust
 /target
+
+/.understand-anything
