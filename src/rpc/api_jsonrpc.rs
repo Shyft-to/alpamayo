@@ -111,6 +111,7 @@ impl State {
         requests_tx: mpsc::Sender<ReadRequest>,
         db_write_inflation_reward: RocksdbWriteInflationReward,
         workers: Sender<WorkRequest>,
+        cluster_confirmed_slot: Arc<AtomicU64>,
     ) -> anyhow::Result<Self> {
         let upstreams = config
             .upstream_jsonrpc
@@ -147,7 +148,7 @@ impl State {
             db_write_inflation_reward,
             upstreams,
             workers,
-            cluster_confirmed_slot: Arc::new(AtomicU64::new(0)),
+            cluster_confirmed_slot,
             health_check_slot_distance: config.health_check.slot_distance,
         })
     }
@@ -166,17 +167,20 @@ pub fn create_request_processor(
     db_write_inflation_reward: RocksdbWriteInflationReward,
     workers: Sender<WorkRequest>,
 ) -> anyhow::Result<RpcRequestsProcessor<Arc<State>>> {
+    let calls = &config.calls_jsonrpc;
+    let needs_poller =
+        calls.contains(&ConfigRpcCallJson::GetHealth) && config.health_check.rpc_uri.is_some();
     let state = State::new(
         config.clone(),
         stored_slots,
         requests_tx,
         db_write_inflation_reward,
         workers,
+        Arc::new(AtomicU64::new(0)),
     )?;
+    let poller_slot = needs_poller.then(|| Arc::clone(&state.cluster_confirmed_slot));
     let mut processor =
         RpcRequestsProcessor::new(config.body_limit, Arc::new(state), config.extra_headers);
-
-    let calls = &config.calls_jsonrpc;
     if calls.contains(&ConfigRpcCallJson::GetBlock) {
         processor.add_handler("getBlock", Box::new(RpcRequestBlock::handle));
     }
@@ -206,8 +210,9 @@ pub fn create_request_processor(
     }
     if calls.contains(&ConfigRpcCallJson::GetHealth) {
         processor.add_handler("getHealth", Box::new(RpcRequestHealth::handle));
-        if let Some(rpc_url) = config.health_check.rpc_uri.clone() {
-            let cluster_slot = Arc::clone(&state.cluster_confirmed_slot);
+        if let (Some(rpc_url), Some(cluster_slot)) =
+            (config.health_check.rpc_uri.clone(), poller_slot)
+        {
             let poll_interval = config.health_check.interval;
             tokio::spawn(async move {
                 let sender = HttpSender::new(rpc_url);
