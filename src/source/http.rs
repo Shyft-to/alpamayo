@@ -91,6 +91,7 @@ pub struct HttpSource {
     httpurl: Option<(Url, Client)>,
     client: RpcClient,
     semaphore: Semaphore,
+    index_vote: bool,
 }
 
 impl fmt::Debug for HttpSource {
@@ -100,7 +101,7 @@ impl fmt::Debug for HttpSource {
 }
 
 impl HttpSource {
-    pub async fn new(config: ConfigSourceHttp) -> Result<Self, ConnectError> {
+    pub async fn new(config: ConfigSourceHttp, index_vote: bool) -> Result<Self, ConnectError> {
         let httpurl = config
             .httpget
             .map(|url| {
@@ -120,6 +121,7 @@ impl HttpSource {
             httpurl,
             client,
             semaphore: Semaphore::new(config.concurrency),
+            index_vote,
         })
     }
 
@@ -178,7 +180,9 @@ impl HttpSource {
             .ok()?;
 
         Some(BlockWithBinary::new_from_confirmed_block_and_slot(
-            block, slot,
+            block,
+            slot,
+            self.index_vote,
         ))
     }
 
@@ -233,7 +237,9 @@ impl HttpSource {
         }
 
         Ok(BlockWithBinary::new_from_confirmed_block_and_slot(
-            block, slot,
+            block,
+            slot,
+            self.index_vote,
         ))
     }
 

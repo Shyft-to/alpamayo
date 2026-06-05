@@ -43,7 +43,11 @@ pub struct BlockWithBinary {
 }
 
 impl BlockWithBinary {
-    pub fn new_from_confirmed_block_and_slot(block: ConfirmedBlock, slot: Slot) -> Self {
+    pub fn new_from_confirmed_block_and_slot(
+        block: ConfirmedBlock,
+        slot: Slot,
+        index_vote: bool,
+    ) -> Self {
         Self::new(
             block.previous_blockhash,
             block.blockhash,
@@ -57,6 +61,7 @@ impl BlockWithBinary {
             block.num_partitions,
             block.block_time,
             block.block_height,
+            index_vote,
         )
     }
 
@@ -70,7 +75,12 @@ impl BlockWithBinary {
         num_partitions: Option<u64>,
         block_time: Option<UnixTimestamp>,
         block_height: Option<Slot>,
+        index_vote: bool,
     ) -> Self {
+        if !index_vote {
+            transactions.retain(|tx| !tx.is_vote);
+        }
+
         let (protobuf, txs_offset) = ConfirmedBlockProtoRef {
             previous_blockhash: &previous_blockhash,
             blockhash: &blockhash,

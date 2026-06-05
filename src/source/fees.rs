@@ -78,7 +78,7 @@ impl TransactionFees {
         })
     }
 
-    fn is_vote(tx: &VersionedTransactionWithStatusMeta) -> bool {
+    pub fn is_vote(tx: &VersionedTransactionWithStatusMeta) -> bool {
         let account_keys = tx.account_keys();
         for instruction in tx.transaction.message.instructions() {
             if parse_vote(instruction, &account_keys).is_ok() {

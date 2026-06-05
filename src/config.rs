@@ -158,6 +158,15 @@ pub struct ConfigStorage {
     /// Read threads options
     #[serde(default)]
     pub read: ConfigStorageRead,
+    /// When false, vote transactions are stripped from block storage and all indexes
+    #[serde(default = "ConfigStorage::default_index_vote_transactions")]
+    pub index_vote_transactions: bool,
+}
+
+impl ConfigStorage {
+    const fn default_index_vote_transactions() -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
