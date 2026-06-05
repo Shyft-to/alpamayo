@@ -327,9 +327,10 @@ impl Stream for StreamSource {
                         }
 
                         // create slot info
+                        let index_vote = this.index_vote;
                         let entry = this.slots.entry(slot);
                         let slot_info =
-                            entry.or_insert_with(|| SlotInfo::new(slot, this.index_vote));
+                            entry.or_insert_with(|| SlotInfo::new(slot, index_vote));
 
                         // store parent and drop message (only processed)
                         if status == SlotStatusProto::SlotCreatedBank {
@@ -393,9 +394,10 @@ impl Stream for StreamSource {
                     })) => match transaction {
                         Some(tx) => {
                             let first_processed = this.first_processed;
+                            let index_vote = this.index_vote;
                             let entry = this.slots.entry(slot);
                             let slot_info =
-                                entry.or_insert_with(|| SlotInfo::new(slot, this.index_vote));
+                                entry.or_insert_with(|| SlotInfo::new(slot, index_vote));
                             let is_vote = tx.is_vote;
                             let index = tx.index;
                             match create_tx_with_meta(tx) {
@@ -435,9 +437,10 @@ impl Stream for StreamSource {
                     Some(UpdateOneof::BlockMeta(block_meta)) => {
                         let slot = block_meta.slot;
                         let first_processed = this.first_processed;
+                        let index_vote = this.index_vote;
                         let entry = this.slots.entry(slot);
                         let slot_info =
-                            entry.or_insert_with(|| SlotInfo::new(slot, this.index_vote));
+                            entry.or_insert_with(|| SlotInfo::new(slot, index_vote));
                         slot_info.block_meta = Some(block_meta);
                         if let Some(first_processed) = first_processed
                             && slot <= first_processed

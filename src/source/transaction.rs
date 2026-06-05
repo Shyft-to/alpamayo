@@ -9,7 +9,7 @@ use {
     solana_storage_proto::convert::generated,
     solana_transaction::TransactionError,
     solana_transaction_status::{
-        TransactionWithStatusMeta, VersionedTransactionWithStatusMeta, extract_and_fmt_memos,
+        TransactionWithStatusMeta, extract_and_fmt_memos,
     },
 };
 
