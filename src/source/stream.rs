@@ -88,6 +88,7 @@ struct SlotInfo {
     block_meta: Option<SubscribeUpdateBlockMeta>,
     sealed: bool,
     ignore_block_build_fail: bool,
+    index_vote: bool,
 }
 
 impl Drop for SlotInfo {
@@ -109,7 +110,7 @@ impl Drop for SlotInfo {
 }
 
 impl SlotInfo {
-    fn new(slot: Slot) -> Self {
+    fn new(slot: Slot, index_vote: bool) -> Self {
         Self {
             slot,
             status: SlotStatusProto::SlotCreatedBank,
@@ -118,6 +119,7 @@ impl SlotInfo {
             block_meta: None,
             sealed: false,
             ignore_block_build_fail: false,
+            index_vote,
         }
     }
 
@@ -163,6 +165,7 @@ impl SlotInfo {
             num_partitions,
             block_meta.block_time.map(|obj| obj.timestamp),
             block_meta.block_height.map(|obj| obj.block_height),
+            self.index_vote,
         )))
     }
 }
@@ -173,6 +176,7 @@ pub struct StreamSource {
     slots: BTreeMap<Slot, SlotInfo>,
     first_processed: Option<Slot>,
     hostname: String,
+    index_vote: bool,
 }
 
 impl Drop for StreamSource {
@@ -182,7 +186,7 @@ impl Drop for StreamSource {
 }
 
 impl StreamSource {
-    pub async fn new(config: ConfigSourceStream) -> Result<Self, ConnectError> {
+    pub async fn new(config: ConfigSourceStream, index_vote: bool) -> Result<Self, ConnectError> {
         let mut connection = config.config.connect().await?;
 
         let version = connection.get_version().await?;
@@ -213,6 +217,7 @@ impl StreamSource {
             slots: BTreeMap::new(),
             first_processed: None,
             hostname,
+            index_vote,
         })
     }
 
@@ -322,8 +327,10 @@ impl Stream for StreamSource {
                         }
 
                         // create slot info
+                        let index_vote = this.index_vote;
                         let entry = this.slots.entry(slot);
-                        let slot_info = entry.or_insert_with(|| SlotInfo::new(slot));
+                        let slot_info =
+                            entry.or_insert_with(|| SlotInfo::new(slot, index_vote));
 
                         // store parent and drop message (only processed)
                         if status == SlotStatusProto::SlotCreatedBank {
@@ -387,8 +394,10 @@ impl Stream for StreamSource {
                     })) => match transaction {
                         Some(tx) => {
                             let first_processed = this.first_processed;
+                            let index_vote = this.index_vote;
                             let entry = this.slots.entry(slot);
-                            let slot_info = entry.or_insert_with(|| SlotInfo::new(slot));
+                            let slot_info =
+                                entry.or_insert_with(|| SlotInfo::new(slot, index_vote));
                             let is_vote = tx.is_vote;
                             let index = tx.index;
                             match create_tx_with_meta(tx) {
@@ -428,8 +437,10 @@ impl Stream for StreamSource {
                     Some(UpdateOneof::BlockMeta(block_meta)) => {
                         let slot = block_meta.slot;
                         let first_processed = this.first_processed;
+                        let index_vote = this.index_vote;
                         let entry = this.slots.entry(slot);
-                        let slot_info = entry.or_insert_with(|| SlotInfo::new(slot));
+                        let slot_info =
+                            entry.or_insert_with(|| SlotInfo::new(slot, index_vote));
                         slot_info.block_meta = Some(block_meta);
                         if let Some(first_processed) = first_processed
                             && slot <= first_processed

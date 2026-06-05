@@ -131,7 +131,9 @@ pub fn start(
                                             slot,
                                             Arc::new(
                                                 BlockWithBinary::new_from_confirmed_block_and_slot(
-                                                    block, slot,
+                                                    block,
+                                                    slot,
+                                                    config.index_vote_transactions,
                                                 ),
                                             ),
                                         )),

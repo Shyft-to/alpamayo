@@ -8,13 +8,16 @@ use {
     solana_signature::Signature,
     solana_storage_proto::convert::generated,
     solana_transaction::TransactionError,
-    solana_transaction_status::{TransactionWithStatusMeta, extract_and_fmt_memos},
+    solana_transaction_status::{
+        TransactionWithStatusMeta, extract_and_fmt_memos,
+    },
 };
 
 #[derive(Debug)]
 pub struct TransactionWithBinary {
     pub key: [u8; 8],
     pub signature: Signature,
+    pub is_vote: bool,
     pub err: Option<TransactionError>,
     pub sfa: Vec<SignatureForAddress>,
     pub fees: Option<TransactionFees>,
@@ -46,13 +49,20 @@ impl TransactionWithBinary {
             }
         };
 
-        let fees = TransactionFees::create(&tx, is_vote);
+        let is_vote = match (is_vote, &tx) {
+            (Some(v), _) => v,
+            (None, TransactionWithStatusMeta::Complete(tx)) => TransactionFees::is_vote(tx),
+            (None, TransactionWithStatusMeta::MissingMetadata(_)) => false,
+        };
+
+        let fees = TransactionFees::create(&tx, Some(is_vote));
 
         let protobuf = generated::ConfirmedTransaction::from(tx).encode_to_vec();
 
         Self {
             key,
             signature,
+            is_vote,
             err,
             sfa,
             fees,

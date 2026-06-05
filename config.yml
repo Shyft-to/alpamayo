@@ -73,6 +73,8 @@ storage:
     thread_max_async_requests: 1024
     # Max number of read requests from files storage, includes: getBlock, getTransaction
     thread_max_files_requests: 32
+  # Skip indexing of vote transactions at RocksDB and Storage Files, by default true.
+  index_vote_transactions: false
 rpc:
   endpoint: http://127.0.0.1:8899/ # RPC endpoint, implement same JSON-RPC API as Agave
   # RPC Tokio runtime, used to parse requests, serialize responses

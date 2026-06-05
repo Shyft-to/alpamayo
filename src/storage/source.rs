@@ -102,9 +102,10 @@ pub async fn start(
     stream_start: Arc<Notify>,
     stream_tx: mpsc::Sender<StreamSourceMessage>,
     shutdown: CancellationToken,
+    index_vote: bool,
 ) -> anyhow::Result<()> {
-    let http = Arc::new(HttpSource::new(config.http).await?);
-    let stream = start_stream(config.stream, stream_tx, stream_start);
+    let http = Arc::new(HttpSource::new(config.http, index_vote).await?);
+    let stream = start_stream(config.stream, stream_tx, stream_start, index_vote);
 
     tokio::pin!(shutdown);
     tokio::pin!(stream);
@@ -126,6 +127,7 @@ async fn start_stream(
     config: ConfigSourceStream,
     stream_tx: mpsc::Sender<StreamSourceMessage>,
     stream_start: Arc<Notify>,
+    index_vote: bool,
 ) -> anyhow::Result<()> {
     let mut backoff_duration = config.reconnect.map(|c| c.backoff_max);
     let backoff_max = config.reconnect.map(|c| c.backoff_max).unwrap_or_default();
@@ -133,7 +135,7 @@ async fn start_stream(
     stream_start.notified().await;
     loop {
         let mut stream = loop {
-            match StreamSource::new(config.clone()).await {
+            match StreamSource::new(config.clone(), index_vote).await {
                 Ok(stream) => break stream,
                 Err(error) => {
                     if let Some(sleep_duration) = backoff_duration {
