@@ -2333,6 +2333,7 @@ struct RpcRequestTransactionsForAddress {
     encoding: UiTransactionEncoding,
     max_supported_transaction_version: Option<u8>,
     filters: Option<GtfaFilters>,
+    token_accounts: GtfaTokenAccountsFilter,
     slot_filter_lower: Option<Slot>,
     slot_filter_upper: Option<Slot>,
     block_time_filter_lower: Option<UnixTimestamp>,
@@ -2371,17 +2372,10 @@ impl RpcRequestHandler for RpcRequestTransactionsForAddress {
             Err(error) => return Err(jsonrpc_response_error(id, error)),
         };
 
-        if let Some(filters) = &filters
-            && filters.token_accounts != GtfaTokenAccountsFilter::None
-        {
-            return Err(jsonrpc_response_error(
-                id,
-                jsonrpc_error_invalid_params::<()>(
-                    "`tokenAccounts` filter values other than `none` are not supported yet",
-                    None,
-                ),
-            ));
-        }
+        let token_accounts = filters
+            .as_ref()
+            .map(|f| f.token_accounts)
+            .unwrap_or_default();
 
         let default_limit = match transaction_details {
             GtfaTransactionDetails::Signatures => state.gtfa_limit_signatures,
@@ -2443,6 +2437,7 @@ impl RpcRequestHandler for RpcRequestTransactionsForAddress {
             encoding,
             max_supported_transaction_version,
             filters,
+            token_accounts,
             slot_filter_lower,
             slot_filter_upper,
             block_time_filter_lower,
@@ -2506,13 +2501,14 @@ impl RpcRequestHandler for RpcRequestTransactionsForAddress {
                 anyhow::bail!("rx channel is closed");
             };
 
-            let (batch, batch_txindices, finished) = match result {
+            let (batch, batch_txindices, batch_token_flags, finished) = match result {
                 ReadResultTransactionsForAddress::Timeout => anyhow::bail!("timeout"),
                 ReadResultTransactionsForAddress::Transactions {
                     signatures,
                     transaction_indices,
+                    token_owner_flags,
                     finished,
-                } => (signatures, transaction_indices, finished),
+                } => (signatures, transaction_indices, token_owner_flags, finished),
                 ReadResultTransactionsForAddress::ReadError(error) => {
                     anyhow::bail!("read error: {error}")
                 }
@@ -2521,9 +2517,24 @@ impl RpcRequestHandler for RpcRequestTransactionsForAddress {
             let batch_was_empty = batch.is_empty();
             let mut reached_limit = false;
 
-            for (raw, txidx) in batch.iter().zip(batch_txindices.iter().copied()) {
+            for ((raw, txidx), flags) in batch
+                .iter()
+                .zip(batch_txindices.iter().copied())
+                .zip(batch_token_flags.iter().copied())
+            {
                 // Always advance storage cursor so next batch resumes after this raw item.
                 storage_cursor = Some((raw.slot, txidx));
+
+                let is_token_owner = flags & 0x01 != 0;
+                let balance_changed = flags & 0x02 != 0;
+                let token_ok = match self.token_accounts {
+                    GtfaTokenAccountsFilter::None => !is_token_owner,
+                    GtfaTokenAccountsFilter::All => true,
+                    GtfaTokenAccountsFilter::BalanceChanged => !is_token_owner || balance_changed,
+                };
+                if !token_ok {
+                    continue;
+                }
 
                 if let Some(filters) = &self.filters {
                     if let Some(block_time_filter) = &filters.block_time {

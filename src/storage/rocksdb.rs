@@ -327,6 +327,12 @@ impl SfaIndexValue {
                 fields |= SfaIndexValueFlags::MEMO;
             }
             fields |= SfaIndexValueFlags::TRANSACTION_INDEX;
+            if sig.is_token_owner {
+                fields |= SfaIndexValueFlags::TOKEN_OWNER;
+            }
+            if sig.token_balance_changed {
+                fields |= SfaIndexValueFlags::TOKEN_BALANCE_CHANGED;
+            }
             buf.push(fields.bits());
 
             buf.extend_from_slice(sig.signature.as_ref());
@@ -392,6 +398,8 @@ impl SfaIndexValue {
                 transaction_index,
                 err,
                 memo,
+                is_token_owner: flags.contains(SfaIndexValueFlags::TOKEN_OWNER),
+                token_balance_changed: flags.contains(SfaIndexValueFlags::TOKEN_BALANCE_CHANGED),
             })
         })
     }
@@ -400,9 +408,11 @@ impl SfaIndexValue {
 bitflags! {
     #[derive(Debug)]
     struct SfaIndexValueFlags: u8 {
-        const ERR =               0b00000001;
-        const MEMO =              0b00000010;
-        const TRANSACTION_INDEX = 0b00000100;
+        const ERR =                 0b00000001;
+        const MEMO =                0b00000010;
+        const TRANSACTION_INDEX =   0b00000100;
+        const TOKEN_OWNER =         0b00001000;
+        const TOKEN_BALANCE_CHANGED = 0b00010000;
     }
 }
 
@@ -1260,10 +1270,12 @@ enum ReadRequest {
         stop_slot: Option<Slot>,
         signatures: Vec<RpcConfirmedTransactionStatusWithSignature>,
         transaction_indices: Vec<u32>,
+        token_owner_flags: Vec<u8>,
         tx: oneshot::Sender<
             anyhow::Result<(
                 Vec<RpcConfirmedTransactionStatusWithSignature>,
                 Vec<u32>,
+                Vec<u8>,
                 bool,
             )>,
         >,
@@ -1333,6 +1345,7 @@ impl RocksdbRead {
                     stop_slot,
                     signatures,
                     transaction_indices,
+                    token_owner_flags,
                     tx,
                 } => {
                     let _ = tx
@@ -1345,6 +1358,7 @@ impl RocksdbRead {
                             stop_slot,
                             signatures,
                             transaction_indices,
+                            token_owner_flags,
                         ))
                         .is_err();
                 }
@@ -1466,9 +1480,11 @@ impl RocksdbRead {
         stop_slot: Option<Slot>,
         mut signatures: Vec<RpcConfirmedTransactionStatusWithSignature>,
         mut transaction_indices: Vec<u32>,
+        mut token_owner_flags: Vec<u8>,
     ) -> anyhow::Result<(
         Vec<RpcConfirmedTransactionStatusWithSignature>,
         Vec<u32>,
+        Vec<u8>,
         bool,
     )> {
         let address_hash = SfaIndex::address_hash(&address);
@@ -1530,6 +1546,8 @@ impl RocksdbRead {
                     }
                 }
 
+                let flags = (sigstatus.is_token_owner as u8)
+                    | ((sigstatus.token_balance_changed as u8) << 1);
                 signatures.push(RpcConfirmedTransactionStatusWithSignature {
                     signature: sigstatus.signature.to_string(),
                     slot: item_slot,
@@ -1539,6 +1557,7 @@ impl RocksdbRead {
                     confirmation_status: None,
                 });
                 transaction_indices.push(sigstatus.transaction_index);
+                token_owner_flags.push(flags);
 
                 if signatures.len() == signatures.capacity() {
                     finished = false;
@@ -1546,7 +1565,7 @@ impl RocksdbRead {
                 }
             }
         }
-        Ok((signatures, transaction_indices, finished))
+        Ok((signatures, transaction_indices, token_owner_flags, finished))
     }
 
     fn spawn_signature_statuses(
@@ -1703,12 +1722,14 @@ impl RocksdbRead {
         stop_slot: Option<Slot>,
         signatures: Vec<RpcConfirmedTransactionStatusWithSignature>,
         transaction_indices: Vec<u32>,
+        token_owner_flags: Vec<u8>,
     ) -> anyhow::Result<
         BoxFuture<
             'static,
             anyhow::Result<(
                 Vec<RpcConfirmedTransactionStatusWithSignature>,
                 Vec<u32>,
+                Vec<u8>,
                 bool,
             )>,
         >,
@@ -1723,6 +1744,7 @@ impl RocksdbRead {
                 stop_slot,
                 signatures,
                 transaction_indices,
+                token_owner_flags,
                 tx,
             })
             .context("failed to send ReadRequest::TransactionsForAddress request")?;

@@ -12,6 +12,8 @@ pub struct SignatureForAddress {
     pub err: Option<TransactionError>,
     pub memo: Option<String>,
     pub transaction_index: u32,
+    pub is_token_owner: bool,
+    pub token_balance_changed: bool,
 }
 
 impl SignatureForAddress {
@@ -31,6 +33,30 @@ impl SignatureForAddress {
             err,
             memo,
             transaction_index,
+            is_token_owner: false,
+            token_balance_changed: false,
+        }
+    }
+
+    pub fn new_token_owner(
+        slot: Slot,
+        address: Pubkey,
+        signature: Signature,
+        err: Option<TransactionError>,
+        memo: Option<String>,
+        transaction_index: u32,
+        token_balance_changed: bool,
+    ) -> Self {
+        Self {
+            key: SfaIndex::encode(&address, slot),
+            address_hash: SfaIndex::address_hash(&address),
+            address,
+            signature,
+            err,
+            memo,
+            transaction_index,
+            is_token_owner: true,
+            token_balance_changed,
         }
     }
 }
@@ -52,6 +78,8 @@ impl SignaturesForAddress {
                 err: sfa.err,
                 memo: sfa.memo,
                 transaction_index: sfa.transaction_index,
+                is_token_owner: sfa.is_token_owner,
+                token_balance_changed: sfa.token_balance_changed,
             }],
         }
     }
@@ -62,6 +90,8 @@ impl SignaturesForAddress {
             err: sfa.err,
             memo: sfa.memo,
             transaction_index: sfa.transaction_index,
+            is_token_owner: sfa.is_token_owner,
+            token_balance_changed: sfa.token_balance_changed,
         });
     }
 }
@@ -72,4 +102,6 @@ pub struct SignatureStatus {
     pub err: Option<TransactionError>,
     pub memo: Option<String>,
     pub transaction_index: u32,
+    pub is_token_owner: bool,
+    pub token_balance_changed: bool,
 }

@@ -2,9 +2,11 @@ use {
     crate::{
         source::{fees::TransactionFees, sfa::SignatureForAddress},
         storage::rocksdb::TransactionIndex,
+        util::{HashMap, HashSet},
     },
     prost::Message as _,
     solana_clock::Slot,
+    solana_pubkey::Pubkey,
     solana_signature::Signature,
     solana_storage_proto::convert::generated,
     solana_transaction::TransactionError,
@@ -49,6 +51,53 @@ impl TransactionWithBinary {
                         transaction_index,
                     ))
                 }
+
+                let direct_keys: HashSet<&Pubkey> = account_keys.iter().collect();
+
+                let pre = tx.meta.pre_token_balances.as_deref().unwrap_or(&[]);
+                let post = tx.meta.post_token_balances.as_deref().unwrap_or(&[]);
+
+                let pre_amounts: HashMap<u8, &str> = pre
+                    .iter()
+                    .map(|b| (b.account_index, b.ui_token_amount.amount.as_str()))
+                    .collect();
+                let post_amounts: HashMap<u8, &str> = post
+                    .iter()
+                    .map(|b| (b.account_index, b.ui_token_amount.amount.as_str()))
+                    .collect();
+
+                let mut owner_balance_changed: HashSet<&str> = HashSet::default();
+                for b in pre.iter().chain(post.iter()) {
+                    let pre_amt = pre_amounts.get(&b.account_index).copied();
+                    let post_amt = post_amounts.get(&b.account_index).copied();
+                    if pre_amt != post_amt {
+                        owner_balance_changed.insert(b.owner.as_str());
+                    }
+                }
+
+                let mut seen_owners: HashSet<&str> = HashSet::default();
+                for b in pre.iter().chain(post.iter()) {
+                    if !seen_owners.insert(b.owner.as_str()) {
+                        continue;
+                    }
+                    let Ok(owner_pubkey) = b.owner.parse::<Pubkey>() else {
+                        continue;
+                    };
+                    if direct_keys.contains(&owner_pubkey) {
+                        continue;
+                    }
+                    let balance_changed = owner_balance_changed.contains(b.owner.as_str());
+                    sfa.push(SignatureForAddress::new_token_owner(
+                        slot,
+                        owner_pubkey,
+                        signature,
+                        err.clone(),
+                        memo.clone(),
+                        transaction_index,
+                        balance_changed,
+                    ));
+                }
+
                 (err, sfa)
             }
         };

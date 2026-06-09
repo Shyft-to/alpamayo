@@ -501,6 +501,9 @@ pub enum ReadResultTransactionsForAddress {
         signatures: Vec<RpcConfirmedTransactionStatusWithSignature>,
         /// Parallel to `signatures`: transaction position within the block.
         transaction_indices: Vec<u32>,
+        /// Parallel to `signatures`: token-owner flags per entry.
+        /// Bit 0 = is_token_owner, bit 1 = token_balance_changed.
+        token_owner_flags: Vec<u8>,
         finished: bool,
     },
     ReadError(anyhow::Error),
@@ -629,6 +632,7 @@ pub enum ReadRequest {
         stop_slot: Option<Slot>,
         signatures: Vec<RpcConfirmedTransactionStatusWithSignature>,
         transaction_indices: Vec<u32>,
+        token_owner_flags: Vec<u8>,
         tx: oneshot::Sender<ReadResultTransactionsForAddress>,
         x_subscription_id: Arc<str>,
     },
@@ -636,6 +640,7 @@ pub enum ReadRequest {
         deadline: Instant,
         signatures: Vec<RpcConfirmedTransactionStatusWithSignature>,
         transaction_indices: Vec<u32>,
+        token_owner_flags: Vec<u8>,
         finished: bool,
         tx: oneshot::Sender<ReadResultTransactionsForAddress>,
     },
@@ -1308,6 +1313,7 @@ impl ReadRequest {
                 // out of the confirmed-in-process block before it lands in the sfa_index.
                 // Note: if a `cursor` resumes pagination right at this slot the in-process
                 // entries are skipped (sfa_index will contain them once the block is flushed).
+                let mut token_owner_flags = Vec::with_capacity(limit);
                 if desc
                     && cursor.is_none()
                     && commitment.is_confirmed()
@@ -1326,6 +1332,9 @@ impl ReadRequest {
                             confirmation_status: Some(TransactionConfirmationStatus::Confirmed),
                         });
                         transaction_indices.push(item.transaction_index);
+                        token_owner_flags.push(
+                            (item.is_token_owner as u8) | ((item.token_balance_changed as u8) << 1),
+                        );
 
                         if signatures.len() == signatures.capacity() {
                             finished = true;
@@ -1336,6 +1345,7 @@ impl ReadRequest {
                         let _ = tx.send(ReadResultTransactionsForAddress::Transactions {
                             signatures,
                             transaction_indices,
+                            token_owner_flags,
                             finished: false,
                         });
                         return None;
@@ -1354,6 +1364,7 @@ impl ReadRequest {
                         stop_slot,
                         signatures,
                         transaction_indices,
+                        token_owner_flags,
                         tx,
                         x_subscription_id,
                     },
@@ -1368,6 +1379,7 @@ impl ReadRequest {
                 stop_slot,
                 signatures,
                 transaction_indices,
+                token_owner_flags,
                 tx,
                 x_subscription_id,
             } => {
@@ -1384,6 +1396,7 @@ impl ReadRequest {
                     stop_slot,
                     signatures,
                     transaction_indices,
+                    token_owner_flags,
                 ) {
                     Ok(fut) => fut,
                     Err(error) => {
@@ -1403,11 +1416,12 @@ impl ReadRequest {
                     .increment(duration_to_seconds(ts.elapsed()));
 
                     match result {
-                        Ok(Ok((signatures, transaction_indices, finished))) => {
+                        Ok(Ok((signatures, transaction_indices, token_owner_flags, finished))) => {
                             Some(ReadRequest::TransactionsForAddress3 {
                                 deadline,
                                 signatures,
                                 transaction_indices,
+                                token_owner_flags,
                                 finished,
                                 tx,
                             })
@@ -1427,6 +1441,7 @@ impl ReadRequest {
                 deadline,
                 signatures,
                 transaction_indices,
+                token_owner_flags,
                 mut finished,
                 tx,
             } => {
@@ -1438,9 +1453,10 @@ impl ReadRequest {
                 let result = match signatures
                     .into_iter()
                     .zip(transaction_indices)
-                    .filter_map(|(mut sig, txidx)| {
+                    .zip(token_owner_flags)
+                    .filter_map(|((mut sig, txidx), flags)| {
                         if sig.block_time.is_some() {
-                            return Some(Ok((sig, txidx)));
+                            return Some(Ok((sig, txidx, flags)));
                         }
 
                         match blocks.get_block_location(sig.slot) {
@@ -1457,7 +1473,7 @@ impl ReadRequest {
                                     } else {
                                         TransactionConfirmationStatus::Confirmed
                                     });
-                                Some(Ok((sig, txidx)))
+                                Some(Ok((sig, txidx, flags)))
                             }
                             _ => {
                                 finished = false;
@@ -1466,11 +1482,19 @@ impl ReadRequest {
                         }
                     })
                     .collect::<Result<Vec<_>, _>>()
-                    .map(|pairs| {
-                        let (signatures, transaction_indices) = pairs.into_iter().unzip();
+                    .map(|triples| {
+                        let mut signatures = Vec::with_capacity(triples.len());
+                        let mut transaction_indices = Vec::with_capacity(triples.len());
+                        let mut token_owner_flags = Vec::with_capacity(triples.len());
+                        for (sig, txidx, flags) in triples {
+                            signatures.push(sig);
+                            transaction_indices.push(txidx);
+                            token_owner_flags.push(flags);
+                        }
                         ReadResultTransactionsForAddress::Transactions {
                             signatures,
                             transaction_indices,
+                            token_owner_flags,
                             finished,
                         }
                     }) {
