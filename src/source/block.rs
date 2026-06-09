@@ -55,7 +55,8 @@ impl BlockWithBinary {
             block
                 .transactions
                 .into_iter()
-                .map(|tx| TransactionWithBinary::new(slot, tx, None))
+                .enumerate()
+                .map(|(index, tx)| TransactionWithBinary::new(slot, tx, None, index as u32))
                 .collect(),
             block.rewards,
             block.num_partitions,

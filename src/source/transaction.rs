@@ -8,9 +8,7 @@ use {
     solana_signature::Signature,
     solana_storage_proto::convert::generated,
     solana_transaction::TransactionError,
-    solana_transaction_status::{
-        TransactionWithStatusMeta, extract_and_fmt_memos,
-    },
+    solana_transaction_status::{TransactionWithStatusMeta, extract_and_fmt_memos},
 };
 
 #[derive(Debug)]
@@ -25,7 +23,12 @@ pub struct TransactionWithBinary {
 }
 
 impl TransactionWithBinary {
-    pub fn new(slot: Slot, tx: TransactionWithStatusMeta, is_vote: Option<bool>) -> Self {
+    pub fn new(
+        slot: Slot,
+        tx: TransactionWithStatusMeta,
+        is_vote: Option<bool>,
+        transaction_index: u32,
+    ) -> Self {
         let signature = *tx.transaction_signature();
         let key = TransactionIndex::encode(&signature);
 
@@ -43,6 +46,7 @@ impl TransactionWithBinary {
                         signature,
                         err.clone(),
                         memo.clone(),
+                        transaction_index,
                     ))
                 }
                 (err, sfa)

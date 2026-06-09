@@ -11,6 +11,7 @@ pub struct SignatureForAddress {
     pub signature: Signature,
     pub err: Option<TransactionError>,
     pub memo: Option<String>,
+    pub transaction_index: u32,
 }
 
 impl SignatureForAddress {
@@ -20,6 +21,7 @@ impl SignatureForAddress {
         signature: Signature,
         err: Option<TransactionError>,
         memo: Option<String>,
+        transaction_index: u32,
     ) -> Self {
         Self {
             key: SfaIndex::encode(&address, slot),
@@ -28,6 +30,7 @@ impl SignatureForAddress {
             signature,
             err,
             memo,
+            transaction_index,
         }
     }
 }
@@ -48,6 +51,7 @@ impl SignaturesForAddress {
                 signature: sfa.signature,
                 err: sfa.err,
                 memo: sfa.memo,
+                transaction_index: sfa.transaction_index,
             }],
         }
     }
@@ -57,6 +61,7 @@ impl SignaturesForAddress {
             signature: sfa.signature,
             err: sfa.err,
             memo: sfa.memo,
+            transaction_index: sfa.transaction_index,
         });
     }
 }
@@ -66,4 +71,5 @@ pub struct SignatureStatus {
     pub signature: Signature,
     pub err: Option<TransactionError>,
     pub memo: Option<String>,
+    pub transaction_index: u32,
 }

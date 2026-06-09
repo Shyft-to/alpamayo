@@ -329,8 +329,7 @@ impl Stream for StreamSource {
                         // create slot info
                         let index_vote = this.index_vote;
                         let entry = this.slots.entry(slot);
-                        let slot_info =
-                            entry.or_insert_with(|| SlotInfo::new(slot, index_vote));
+                        let slot_info = entry.or_insert_with(|| SlotInfo::new(slot, index_vote));
 
                         // store parent and drop message (only processed)
                         if status == SlotStatusProto::SlotCreatedBank {
@@ -408,7 +407,12 @@ impl Stream for StreamSource {
 
                                     slot_info.transactions.push((
                                         index,
-                                        TransactionWithBinary::new(slot, tx, Some(is_vote)),
+                                        TransactionWithBinary::new(
+                                            slot,
+                                            tx,
+                                            Some(is_vote),
+                                            index as u32,
+                                        ),
                                     ));
                                     if let Some(first_processed) = first_processed
                                         && slot <= first_processed
@@ -439,8 +443,7 @@ impl Stream for StreamSource {
                         let first_processed = this.first_processed;
                         let index_vote = this.index_vote;
                         let entry = this.slots.entry(slot);
-                        let slot_info =
-                            entry.or_insert_with(|| SlotInfo::new(slot, index_vote));
+                        let slot_info = entry.or_insert_with(|| SlotInfo::new(slot, index_vote));
                         slot_info.block_meta = Some(block_meta);
                         if let Some(first_processed) = first_processed
                             && slot <= first_processed
