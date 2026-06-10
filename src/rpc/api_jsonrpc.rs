@@ -20,7 +20,7 @@ use {
         util::HashMap,
     },
     crossbeam::channel::{Sender, TrySendError},
-    futures::future::BoxFuture,
+    futures::future::{BoxFuture, try_join_all},
     jsonrpsee_types::{
         Extensions, Id, Params, Request, Response, ResponsePayload, TwoPointZero,
         error::{ErrorObjectOwned, INVALID_PARAMS_MSG},
@@ -78,6 +78,7 @@ use {
     },
     tokio::{
         sync::{mpsc, oneshot},
+        task::spawn_blocking,
         time::sleep,
     },
     tracing::error,
@@ -2517,6 +2518,8 @@ impl RpcRequestHandler for RpcRequestTransactionsForAddress {
             let batch_was_empty = batch.is_empty();
             let mut reached_limit = false;
 
+            let mut pending_full = Vec::new();
+
             for ((raw, txidx), flags) in batch
                 .iter()
                 .zip(batch_txindices.iter().copied())
@@ -2570,20 +2573,7 @@ impl RpcRequestHandler for RpcRequestTransactionsForAddress {
                         });
                     }
                     GtfaTransactionDetails::Full => {
-                        let signature: Signature = raw.signature.parse().expect("valid signature");
-                        match self
-                            .build_full_entry(
-                                signature,
-                                raw.slot,
-                                raw.block_time,
-                                transaction_index,
-                                deadline,
-                            )
-                            .await?
-                        {
-                            Ok(entry) => full_entries.push(entry),
-                            Err(response) => return Ok(response),
-                        }
+                        pending_full.push((raw.clone(), transaction_index));
                     }
                 }
 
@@ -2592,9 +2582,33 @@ impl RpcRequestHandler for RpcRequestTransactionsForAddress {
                     transaction_index: txidx as usize,
                 });
 
-                if sig_entries.len() + full_entries.len() == self.limit {
+                if sig_entries.len() + full_entries.len() + pending_full.len() == self.limit {
                     reached_limit = true;
                     break;
+                }
+            }
+
+            if !pending_full.is_empty() {
+                // Fetch + decode + encode all pending full entries concurrently instead of
+                // one-by-one: overlaps storage round-trips and offloads the CPU-heavy
+                // encode step (see build_full_entry) off the async runtime workers.
+                let results =
+                    try_join_all(pending_full.into_iter().map(|(raw, transaction_index)| {
+                        let signature: Signature = raw.signature.parse().expect("valid signature");
+                        self.build_full_entry(
+                            signature,
+                            raw.slot,
+                            raw.block_time,
+                            transaction_index,
+                            deadline,
+                        )
+                    }))
+                    .await?;
+                for result in results {
+                    match result {
+                        Ok(entry) => full_entries.push(entry),
+                        Err(response) => return Ok(response),
+                    }
                 }
             }
 
@@ -2681,40 +2695,51 @@ impl RpcRequestTransactionsForAddress {
         };
         let block_time = block_time.or(index_block_time);
 
-        let tx_with_meta = match generated::ConfirmedTransaction::decode(bytes.as_ref()) {
-            Ok(tx) => match TransactionWithStatusMeta::try_from(tx) {
-                Ok(tx_with_meta) => tx_with_meta,
-                Err(error) => {
-                    error!(slot, ?error, "failed to decode transaction");
-                    anyhow::bail!("failed to decode transaction")
-                }
-            },
-            Err(error) => {
-                error!(
-                    slot,
-                    ?error,
-                    "failed to decode transaction protobuf / bincode"
-                );
-                anyhow::bail!("failed to decode transaction protobuf / bincode")
-            }
-        };
+        let encoding = self.encoding;
+        let max_supported_transaction_version = self.max_supported_transaction_version;
+        let id = self.id.clone();
 
-        let confirmed_tx = ConfirmedTransactionWithStatusMeta {
-            slot,
-            tx_with_meta,
-            block_time,
-        };
-        match confirmed_tx.encode(self.encoding, self.max_supported_transaction_version) {
-            Ok(encoded) => Ok(Ok(GtfaFullEntry {
-                slot: index_slot,
-                transaction_index,
+        match spawn_blocking(move || {
+            let tx_with_meta = match generated::ConfirmedTransaction::decode(bytes.as_ref()) {
+                Ok(tx) => match TransactionWithStatusMeta::try_from(tx) {
+                    Ok(tx_with_meta) => tx_with_meta,
+                    Err(error) => {
+                        error!(slot, ?error, "failed to decode transaction");
+                        anyhow::bail!("failed to decode transaction")
+                    }
+                },
+                Err(error) => {
+                    error!(
+                        slot,
+                        ?error,
+                        "failed to decode transaction protobuf / bincode"
+                    );
+                    anyhow::bail!("failed to decode transaction protobuf / bincode")
+                }
+            };
+
+            let confirmed_tx = ConfirmedTransactionWithStatusMeta {
+                slot,
+                tx_with_meta,
                 block_time,
-                transaction: encoded.transaction,
-            })),
-            Err(error) => Ok(Err(jsonrpc_response_error_custom(
-                self.id.clone(),
-                RpcCustomError::from(error),
-            ))),
+            };
+            match confirmed_tx.encode(encoding, max_supported_transaction_version) {
+                Ok(encoded) => Ok(Ok(GtfaFullEntry {
+                    slot: index_slot,
+                    transaction_index,
+                    block_time,
+                    transaction: encoded.transaction,
+                })),
+                Err(error) => Ok(Err(jsonrpc_response_error_custom(
+                    id,
+                    RpcCustomError::from(error),
+                ))),
+            }
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => anyhow::bail!("encode task panicked: {error}"),
         }
     }
 }
