@@ -495,6 +495,21 @@ pub enum ReadResultSignaturesForAddress {
 }
 
 #[derive(Debug)]
+pub enum ReadResultTransactionsForAddress {
+    Timeout,
+    Transactions {
+        signatures: Vec<RpcConfirmedTransactionStatusWithSignature>,
+        /// Parallel to `signatures`: transaction position within the block.
+        transaction_indices: Vec<u32>,
+        /// Parallel to `signatures`: token-owner flags per entry.
+        /// Bit 0 = is_token_owner, bit 1 = token_balance_changed.
+        token_owner_flags: Vec<u8>,
+        finished: bool,
+    },
+    ReadError(anyhow::Error),
+}
+
+#[derive(Debug)]
 pub enum ReadResultSignatureStatuses {
     Timeout,
     Signatures(Vec<Option<TransactionStatus>>),
@@ -588,6 +603,46 @@ pub enum ReadRequest {
         signatures: Vec<RpcConfirmedTransactionStatusWithSignature>,
         finished: bool,
         tx: oneshot::Sender<ReadResultSignaturesForAddress>,
+    },
+    TransactionsForAddress {
+        deadline: Instant,
+        commitment: CommitmentConfig,
+        address: Pubkey,
+        desc: bool,
+        // resume point from a previous page: (slot, transaction_index within block)
+        cursor: Option<(Slot, u32)>,
+        // bounds derived from the `slot` filter, combined with the commitment
+        // slot to determine the scan range and stop point per direction
+        slot_filter_lower: Option<Slot>,
+        slot_filter_upper: Option<Slot>,
+        // bounds from the `blockTime` filter; converted to slot bounds in storage
+        // using the in-memory block_time_index on StoredBlocksRead
+        block_time_filter_lower: Option<UnixTimestamp>,
+        block_time_filter_upper: Option<UnixTimestamp>,
+        limit: usize,
+        tx: oneshot::Sender<ReadResultTransactionsForAddress>,
+        x_subscription_id: Arc<str>,
+    },
+    TransactionsForAddress2 {
+        deadline: Instant,
+        address: Pubkey,
+        desc: bool,
+        slot: Slot,
+        cursor_transaction_index: Option<u32>,
+        stop_slot: Option<Slot>,
+        signatures: Vec<RpcConfirmedTransactionStatusWithSignature>,
+        transaction_indices: Vec<u32>,
+        token_owner_flags: Vec<u8>,
+        tx: oneshot::Sender<ReadResultTransactionsForAddress>,
+        x_subscription_id: Arc<str>,
+    },
+    TransactionsForAddress3 {
+        deadline: Instant,
+        signatures: Vec<RpcConfirmedTransactionStatusWithSignature>,
+        transaction_indices: Vec<u32>,
+        token_owner_flags: Vec<u8>,
+        finished: bool,
+        tx: oneshot::Sender<ReadResultTransactionsForAddress>,
     },
     SignatureStatuses {
         deadline: Instant,
@@ -1182,6 +1237,266 @@ impl ReadRequest {
                         signatures,
                         finished,
                         before: None,
+                    }) {
+                    Ok(value) => value,
+                    Err(value) => value,
+                };
+
+                let _ = tx.send(result);
+                None
+            }
+            Self::TransactionsForAddress {
+                deadline,
+                commitment,
+                address,
+                desc,
+                cursor,
+                slot_filter_lower,
+                slot_filter_upper,
+                block_time_filter_lower,
+                block_time_filter_upper,
+                limit,
+                tx,
+                x_subscription_id,
+            } => {
+                if deadline < Instant::now() {
+                    let _ = tx.send(ReadResultTransactionsForAddress::Timeout);
+                    return None;
+                }
+
+                let commitment_slot = if commitment.is_confirmed() {
+                    storage_processed.confirmed_slot
+                } else {
+                    storage_processed.finalized_slot
+                };
+
+                // Refine slot bounds using the block_time_index when a blockTime
+                // filter is present. The conversion is approximate (block_time is
+                // not strictly monotonic), so the app-side filter remains the
+                // accuracy gate; these bounds only reduce the DB scan range.
+                let slot_filter_lower = match (slot_filter_lower, block_time_filter_lower) {
+                    (a, None) => a,
+                    (None, Some(bt)) => blocks.block_time_to_slot_lower(bt),
+                    (Some(s), Some(bt)) => {
+                        Some(s.max(blocks.block_time_to_slot_lower(bt).unwrap_or(0)))
+                    }
+                };
+                let slot_filter_upper = match (slot_filter_upper, block_time_filter_upper) {
+                    (a, None) => a,
+                    (None, Some(bt)) => blocks.block_time_to_slot_upper(bt),
+                    (Some(s), Some(bt)) => {
+                        Some(s.min(blocks.block_time_to_slot_upper(bt).unwrap_or(s)))
+                    }
+                };
+
+                let mut signatures = Vec::with_capacity(limit);
+                let mut transaction_indices = Vec::with_capacity(limit);
+                let cursor_transaction_index = cursor.map(|(_, txidx)| txidx);
+
+                let (mut slot, stop_slot) = if desc {
+                    let start = cursor.map_or_else(
+                        || {
+                            slot_filter_upper
+                                .map_or(commitment_slot, |bound| bound.min(commitment_slot))
+                        },
+                        |(slot, _)| slot,
+                    );
+                    (start, slot_filter_lower)
+                } else {
+                    let start = cursor.map_or(slot_filter_lower.unwrap_or(0), |(slot, _)| slot);
+                    let stop = slot_filter_upper
+                        .map_or(commitment_slot, |bound| bound.min(commitment_slot));
+                    (start, Some(stop))
+                };
+
+                // Fast path for the very first (descending) page: pull matching signatures
+                // out of the confirmed-in-process block before it lands in the sfa_index.
+                // Note: if a `cursor` resumes pagination right at this slot the in-process
+                // entries are skipped (sfa_index will contain them once the block is flushed).
+                let mut token_owner_flags = Vec::with_capacity(limit);
+                if desc
+                    && cursor.is_none()
+                    && commitment.is_confirmed()
+                    && let Some((confirmed_in_process_slot, Some(block))) = confirmed_in_process
+                    && *confirmed_in_process_slot <= slot
+                    && let Some(sfa) = block.sfa.get(&address)
+                {
+                    let mut finished = false;
+                    for item in sfa.signatures.iter() {
+                        signatures.push(RpcConfirmedTransactionStatusWithSignature {
+                            signature: item.signature.to_string(),
+                            slot: *confirmed_in_process_slot,
+                            err: item.err.clone().map(Into::into),
+                            memo: item.memo.clone(),
+                            block_time: block.block_time,
+                            confirmation_status: Some(TransactionConfirmationStatus::Confirmed),
+                        });
+                        transaction_indices.push(item.transaction_index);
+                        token_owner_flags.push(
+                            (item.is_token_owner as u8) | ((item.token_balance_changed as u8) << 1),
+                        );
+
+                        if signatures.len() == signatures.capacity() {
+                            finished = true;
+                            break;
+                        }
+                    }
+                    if finished {
+                        let _ = tx.send(ReadResultTransactionsForAddress::Transactions {
+                            signatures,
+                            transaction_indices,
+                            token_owner_flags,
+                            finished: false,
+                        });
+                        return None;
+                    }
+
+                    slot = confirmed_in_process_slot.saturating_sub(1);
+                }
+
+                Some(Box::pin(ready(Some(
+                    ReadRequest::TransactionsForAddress2 {
+                        deadline,
+                        address,
+                        desc,
+                        slot,
+                        cursor_transaction_index,
+                        stop_slot,
+                        signatures,
+                        transaction_indices,
+                        token_owner_flags,
+                        tx,
+                        x_subscription_id,
+                    },
+                ))))
+            }
+            Self::TransactionsForAddress2 {
+                deadline,
+                address,
+                desc,
+                slot,
+                cursor_transaction_index,
+                stop_slot,
+                signatures,
+                transaction_indices,
+                token_owner_flags,
+                tx,
+                x_subscription_id,
+            } => {
+                if deadline < Instant::now() {
+                    let _ = tx.send(ReadResultTransactionsForAddress::Timeout);
+                    return None;
+                }
+
+                let read_fut = match db_read.read_transactions_for_address(
+                    address,
+                    slot,
+                    desc,
+                    cursor_transaction_index,
+                    stop_slot,
+                    signatures,
+                    transaction_indices,
+                    token_owner_flags,
+                ) {
+                    Ok(fut) => fut,
+                    Err(error) => {
+                        let _ = tx.send(ReadResultTransactionsForAddress::ReadError(error));
+                        return None;
+                    }
+                };
+
+                Some(Box::pin(async move {
+                    let ts = quanta::Instant::now();
+                    let result = timeout_at(deadline.into(), read_fut).await;
+                    gauge!(
+                        READ_DISK_SECONDS_TOTAL,
+                        "x_subscription_id" => x_subscription_id,
+                        "type" => "index_tfa",
+                    )
+                    .increment(duration_to_seconds(ts.elapsed()));
+
+                    match result {
+                        Ok(Ok((signatures, transaction_indices, token_owner_flags, finished))) => {
+                            Some(ReadRequest::TransactionsForAddress3 {
+                                deadline,
+                                signatures,
+                                transaction_indices,
+                                token_owner_flags,
+                                finished,
+                                tx,
+                            })
+                        }
+                        Ok(Err(error)) => {
+                            let _ = tx.send(ReadResultTransactionsForAddress::ReadError(error));
+                            None
+                        }
+                        Err(_error) => {
+                            let _ = tx.send(ReadResultTransactionsForAddress::Timeout);
+                            None
+                        }
+                    }
+                }))
+            }
+            Self::TransactionsForAddress3 {
+                deadline,
+                signatures,
+                transaction_indices,
+                token_owner_flags,
+                mut finished,
+                tx,
+            } => {
+                if deadline < Instant::now() {
+                    let _ = tx.send(ReadResultTransactionsForAddress::Timeout);
+                    return None;
+                }
+
+                let result = match signatures
+                    .into_iter()
+                    .zip(transaction_indices)
+                    .zip(token_owner_flags)
+                    .filter_map(|((mut sig, txidx), flags)| {
+                        if sig.block_time.is_some() {
+                            return Some(Ok((sig, txidx, flags)));
+                        }
+
+                        match blocks.get_block_location(sig.slot) {
+                            StorageBlockLocationResult::SlotMismatch => {
+                                Some(Err(ReadResultTransactionsForAddress::ReadError(
+                                    anyhow::anyhow!(io::Error::other("item/slot mismatch",)),
+                                )))
+                            }
+                            StorageBlockLocationResult::Found(location) => {
+                                sig.block_time = location.block_time;
+                                sig.confirmation_status =
+                                    Some(if sig.slot <= storage_processed.finalized_slot {
+                                        TransactionConfirmationStatus::Finalized
+                                    } else {
+                                        TransactionConfirmationStatus::Confirmed
+                                    });
+                                Some(Ok((sig, txidx, flags)))
+                            }
+                            _ => {
+                                finished = false;
+                                None
+                            }
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(|triples| {
+                        let mut signatures = Vec::with_capacity(triples.len());
+                        let mut transaction_indices = Vec::with_capacity(triples.len());
+                        let mut token_owner_flags = Vec::with_capacity(triples.len());
+                        for (sig, txidx, flags) in triples {
+                            signatures.push(sig);
+                            transaction_indices.push(txidx);
+                            token_owner_flags.push(flags);
+                        }
+                        ReadResultTransactionsForAddress::Transactions {
+                            signatures,
+                            transaction_indices,
+                            token_owner_flags,
+                            finished,
+                        }
                     }) {
                     Ok(value) => value,
                     Err(value) => value,

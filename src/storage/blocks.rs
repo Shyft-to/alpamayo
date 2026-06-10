@@ -5,6 +5,7 @@ use {
         util::{HashMap, VecSide},
     },
     solana_clock::{MAX_RECENT_BLOCKHASHES, Slot, UnixTimestamp},
+    std::collections::BTreeMap,
     tokio::sync::broadcast,
     tracing::info,
 };
@@ -91,10 +92,27 @@ impl StoredBlocksWrite {
     }
 
     pub fn to_read(&self) -> StoredBlocksRead {
+        let mut block_time_index = BTreeMap::new();
+        if self.blocks[self.tail].exists {
+            let mut idx = self.tail;
+            loop {
+                let block = self.blocks[idx];
+                if block.exists && !block.dead {
+                    if let Some(bt) = block.block_time {
+                        block_time_index.insert((bt, block.slot), ());
+                    }
+                }
+                if idx == self.head {
+                    break;
+                }
+                idx = (idx + 1) % self.blocks.len();
+            }
+        }
         StoredBlocksRead {
             blocks: self.blocks.clone(),
             tail: self.tail,
             head: self.head,
+            block_time_index,
         }
     }
 
@@ -278,27 +296,70 @@ pub struct StoredBlocksRead {
     blocks: Vec<StoredBlock>,
     tail: usize, // lowest slot
     head: usize, // highest slot
+    block_time_index: BTreeMap<(UnixTimestamp, Slot), ()>,
 }
 
 impl StoredBlocksRead {
     pub fn pop_block_back(&mut self) {
+        let old = self.blocks[self.tail];
+        if old.exists && !old.dead {
+            if let Some(bt) = old.block_time {
+                self.block_time_index.remove(&(bt, old.slot));
+            }
+        }
         self.blocks[self.tail] = StoredBlock::new_noexists();
         self.tail = (self.tail + 1) % self.blocks.len();
     }
 
     pub fn pop_block_front(&mut self) {
+        let old = self.blocks[self.head];
+        if old.exists && !old.dead {
+            if let Some(bt) = old.block_time {
+                self.block_time_index.remove(&(bt, old.slot));
+            }
+        }
         self.blocks[self.head] = StoredBlock::new_noexists();
         self.head = self.head.checked_sub(1).unwrap_or(self.blocks.len() - 1);
     }
 
     pub fn push_block_back(&mut self, message: StoredBlockPushSync) {
         self.tail = self.tail.checked_sub(1).unwrap_or(self.blocks.len() - 1);
-        self.blocks[self.tail] = message.block;
+        let block = message.block;
+        if !block.dead {
+            if let Some(bt) = block.block_time {
+                self.block_time_index.insert((bt, block.slot), ());
+            }
+        }
+        self.blocks[self.tail] = block;
     }
 
     pub fn push_block_front(&mut self, message: StoredBlockPushSync) {
         self.head = (self.head + 1) % self.blocks.len();
-        self.blocks[self.head] = message.block;
+        let block = message.block;
+        if !block.dead {
+            if let Some(bt) = block.block_time {
+                self.block_time_index.insert((bt, block.slot), ());
+            }
+        }
+        self.blocks[self.head] = block;
+    }
+
+    /// Lowest slot whose block_time >= gte. Conservative: may include a few
+    /// extra slots before the true boundary due to minor block_time non-monotonicity.
+    pub fn block_time_to_slot_lower(&self, gte: UnixTimestamp) -> Option<Slot> {
+        self.block_time_index
+            .range((gte, 0)..)
+            .next()
+            .map(|((_, slot), _)| *slot)
+    }
+
+    /// Highest slot whose block_time <= lte. Conservative: may include a few
+    /// extra slots after the true boundary due to minor block_time non-monotonicity.
+    pub fn block_time_to_slot_upper(&self, lte: UnixTimestamp) -> Option<Slot> {
+        self.block_time_index
+            .range(..=(lte, Slot::MAX))
+            .next_back()
+            .map(|((_, slot), _)| *slot)
     }
 
     pub fn get_block_location(&self, slot: Slot) -> StorageBlockLocationResult {

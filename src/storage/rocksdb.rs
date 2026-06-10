@@ -326,9 +326,17 @@ impl SfaIndexValue {
             if sig.memo.is_some() {
                 fields |= SfaIndexValueFlags::MEMO;
             }
+            fields |= SfaIndexValueFlags::TRANSACTION_INDEX;
+            if sig.is_token_owner {
+                fields |= SfaIndexValueFlags::TOKEN_OWNER;
+            }
+            if sig.token_balance_changed {
+                fields |= SfaIndexValueFlags::TOKEN_BALANCE_CHANGED;
+            }
             buf.push(fields.bits());
 
             buf.extend_from_slice(sig.signature.as_ref());
+            buf.extend_from_slice(&sig.transaction_index.to_be_bytes());
             if let Some(err) = &sig.err {
                 let data = bincode::serialize(err).expect("bincode never fail");
                 encode_varint(data.len() as u64, buf);
@@ -354,9 +362,19 @@ impl SfaIndexValue {
                 .try_copy_to_slice(&mut signature)
                 .context("failed to read signature")?;
 
+            let transaction_index = if flags.contains(SfaIndexValueFlags::TRANSACTION_INDEX) {
+                let mut bytes = [0u8; 4];
+                slice
+                    .try_copy_to_slice(&mut bytes)
+                    .context("failed to read transaction_index")?;
+                u32::from_be_bytes(bytes)
+            } else {
+                0
+            };
+
             let err = if flags.contains(SfaIndexValueFlags::ERR) {
                 let size = decode_varint(slice).context("failed to decode err size")? as usize;
-                anyhow::ensure!(slice.remaining() >= size, "not enough bytes for memo");
+                anyhow::ensure!(slice.remaining() >= size, "not enough bytes for err");
                 let err = bincode::deserialize(&slice[0..size]).context("failed to decode err")?;
                 slice.advance(size);
                 Some(err)
@@ -377,8 +395,11 @@ impl SfaIndexValue {
 
             Some(SignatureStatus {
                 signature: signature.into(),
+                transaction_index,
                 err,
                 memo,
+                is_token_owner: flags.contains(SfaIndexValueFlags::TOKEN_OWNER),
+                token_balance_changed: flags.contains(SfaIndexValueFlags::TOKEN_BALANCE_CHANGED),
             })
         })
     }
@@ -387,8 +408,11 @@ impl SfaIndexValue {
 bitflags! {
     #[derive(Debug)]
     struct SfaIndexValueFlags: u8 {
-        const ERR =  0b00000001;
-        const MEMO = 0b00000010;
+        const ERR =                 0b00000001;
+        const MEMO =                0b00000010;
+        const TRANSACTION_INDEX =   0b00000100;
+        const TOKEN_OWNER =         0b00001000;
+        const TOKEN_BALANCE_CHANGED = 0b00010000;
     }
 }
 
@@ -1238,6 +1262,24 @@ enum ReadRequest {
             anyhow::Result<(Vec<RpcConfirmedTransactionStatusWithSignature>, bool)>,
         >,
     },
+    TransactionsForAddress {
+        address: Pubkey,
+        slot: Slot,
+        desc: bool,
+        cursor_transaction_index: Option<u32>,
+        stop_slot: Option<Slot>,
+        signatures: Vec<RpcConfirmedTransactionStatusWithSignature>,
+        transaction_indices: Vec<u32>,
+        token_owner_flags: Vec<u8>,
+        tx: oneshot::Sender<
+            anyhow::Result<(
+                Vec<RpcConfirmedTransactionStatusWithSignature>,
+                Vec<u32>,
+                Vec<u8>,
+                bool,
+            )>,
+        >,
+    },
     SignatureStatuses {
         signatures: Vec<Signature>,
         tx: oneshot::Sender<anyhow::Result<Vec<(Signature, TransactionIndexValue<'static>)>>>,
@@ -1292,6 +1334,31 @@ impl RocksdbRead {
                     let _ = tx
                         .send(Self::spawn_signatires_for_address(
                             &db, address, slot, before, until, signatures,
+                        ))
+                        .is_err();
+                }
+                ReadRequest::TransactionsForAddress {
+                    address,
+                    slot,
+                    desc,
+                    cursor_transaction_index,
+                    stop_slot,
+                    signatures,
+                    transaction_indices,
+                    token_owner_flags,
+                    tx,
+                } => {
+                    let _ = tx
+                        .send(Self::spawn_transactions_for_address(
+                            &db,
+                            address,
+                            slot,
+                            desc,
+                            cursor_transaction_index,
+                            stop_slot,
+                            signatures,
+                            transaction_indices,
+                            token_owner_flags,
                         ))
                         .is_err();
                 }
@@ -1401,6 +1468,104 @@ impl RocksdbRead {
             }
         }
         Ok((signatures, finished))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_transactions_for_address(
+        db: &DB,
+        address: Pubkey,
+        slot: Slot,
+        desc: bool,
+        mut cursor_transaction_index: Option<u32>,
+        stop_slot: Option<Slot>,
+        mut signatures: Vec<RpcConfirmedTransactionStatusWithSignature>,
+        mut transaction_indices: Vec<u32>,
+        mut token_owner_flags: Vec<u8>,
+    ) -> anyhow::Result<(
+        Vec<RpcConfirmedTransactionStatusWithSignature>,
+        Vec<u32>,
+        Vec<u8>,
+        bool,
+    )> {
+        let address_hash = SfaIndex::address_hash(&address);
+        let key = SfaIndex::concat(address_hash, slot);
+        let direction = if desc {
+            Direction::Reverse
+        } else {
+            Direction::Forward
+        };
+        // unless we stop early because the result page is full, there is no more
+        // local data left to scan (no upstream fallback for this method)
+        let mut finished = true;
+        'outer: for item in db.iterator_cf(
+            Rocksdb::cf_handle::<SfaIndex>(db),
+            IteratorMode::From(&key, direction),
+        ) {
+            let (key, value) = item.context("failed to read next row")?;
+            let (item_address_hash, item_slot) = SfaIndex::decode(&key)?;
+            if item_address_hash != address_hash {
+                break;
+            }
+
+            if let Some(stop_slot) = stop_slot {
+                let out_of_range = if desc {
+                    item_slot < stop_slot
+                } else {
+                    item_slot > stop_slot
+                };
+                if out_of_range {
+                    break;
+                }
+            }
+
+            // entries inside a slot are stored newest-first (i.e. in descending
+            // transaction order); for ascending scans we need them oldest-first
+            let mut slice = value.as_ref();
+            let mut entries = vec![];
+            while let Some(sigstatus) = SfaIndexValue::decode(&mut slice)? {
+                entries.push(sigstatus);
+            }
+            let iter: Box<dyn Iterator<Item = SignatureStatus>> = if desc {
+                Box::new(entries.into_iter())
+            } else {
+                Box::new(entries.into_iter().rev())
+            };
+
+            for sigstatus in iter {
+                if let Some(cursor_txidx) = cursor_transaction_index {
+                    let skip = if desc {
+                        sigstatus.transaction_index >= cursor_txidx
+                    } else {
+                        sigstatus.transaction_index <= cursor_txidx
+                    };
+                    if skip {
+                        if sigstatus.transaction_index == cursor_txidx {
+                            cursor_transaction_index = None;
+                        }
+                        continue;
+                    }
+                }
+
+                let flags = (sigstatus.is_token_owner as u8)
+                    | ((sigstatus.token_balance_changed as u8) << 1);
+                signatures.push(RpcConfirmedTransactionStatusWithSignature {
+                    signature: sigstatus.signature.to_string(),
+                    slot: item_slot,
+                    err: sigstatus.err.map(Into::into),
+                    memo: sigstatus.memo,
+                    block_time: None,
+                    confirmation_status: None,
+                });
+                transaction_indices.push(sigstatus.transaction_index);
+                token_owner_flags.push(flags);
+
+                if signatures.len() == signatures.capacity() {
+                    finished = false;
+                    break 'outer;
+                }
+            }
+        }
+        Ok((signatures, transaction_indices, token_owner_flags, finished))
     }
 
     fn spawn_signature_statuses(
@@ -1544,6 +1709,48 @@ impl RocksdbRead {
         Ok(Box::pin(async move {
             rx.await
                 .context("failed to get ReadRequest::SignaturesForAddress request result")?
+        }))
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn read_transactions_for_address(
+        &self,
+        address: Pubkey,
+        slot: Slot,
+        desc: bool,
+        cursor_transaction_index: Option<u32>,
+        stop_slot: Option<Slot>,
+        signatures: Vec<RpcConfirmedTransactionStatusWithSignature>,
+        transaction_indices: Vec<u32>,
+        token_owner_flags: Vec<u8>,
+    ) -> anyhow::Result<
+        BoxFuture<
+            'static,
+            anyhow::Result<(
+                Vec<RpcConfirmedTransactionStatusWithSignature>,
+                Vec<u32>,
+                Vec<u8>,
+                bool,
+            )>,
+        >,
+    > {
+        let (tx, rx) = oneshot::channel();
+        self.req_tx
+            .send(ReadRequest::TransactionsForAddress {
+                address,
+                slot,
+                desc,
+                cursor_transaction_index,
+                stop_slot,
+                signatures,
+                transaction_indices,
+                token_owner_flags,
+                tx,
+            })
+            .context("failed to send ReadRequest::TransactionsForAddress request")?;
+        Ok(Box::pin(async move {
+            rx.await
+                .context("failed to get ReadRequest::TransactionsForAddress request result")?
         }))
     }
 

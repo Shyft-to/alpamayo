@@ -111,6 +111,7 @@ rpc:
     - getSignatureStatuses
     - getSlot
     - getTransaction
+    - getTransactionsForAddress
     - getVersion
     - isBlockhashValid
   gsfa_limit: 1000 # Max limit in `getSignaturesForAddress`, default value in Agave is 1000

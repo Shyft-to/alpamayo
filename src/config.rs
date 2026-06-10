@@ -337,6 +337,18 @@ pub struct ConfigRpc {
         deserialize_with = "deserialize_num_str"
     )]
     pub gsfa_limit: usize,
+    /// Maximum number of results in getTransactionsForAddress (signatures mode)
+    #[serde(
+        default = "ConfigRpc::default_gtfa_limit_signatures",
+        deserialize_with = "deserialize_num_str"
+    )]
+    pub gtfa_limit_signatures: usize,
+    /// Maximum number of results in getTransactionsForAddress (full transactions mode)
+    #[serde(
+        default = "ConfigRpc::default_gtfa_limit_full",
+        deserialize_with = "deserialize_num_str"
+    )]
+    pub gtfa_limit_full: usize,
     /// Enable transaction history for getSignatureStatuses
     #[serde(default = "ConfigRpc::default_gss_transaction_history")]
     pub gss_transaction_history: bool,
@@ -393,6 +405,14 @@ impl ConfigRpc {
 
     const fn default_gsfa_limit() -> usize {
         MAX_GET_CONFIRMED_SIGNATURES_FOR_ADDRESS2_LIMIT
+    }
+
+    const fn default_gtfa_limit_signatures() -> usize {
+        1_000
+    }
+
+    const fn default_gtfa_limit_full() -> usize {
+        100
     }
 
     const fn default_gss_transaction_history() -> bool {
@@ -457,6 +477,7 @@ pub enum ConfigRpcCallJson {
     GetSignatureStatuses,
     GetSlot,
     GetTransaction,
+    GetTransactionsForAddress,
     GetVersion,
     IsBlockhashValid,
 }
@@ -480,6 +501,7 @@ impl ConfigRpcCallJson {
             Self::GetSignatureStatuses,
             Self::GetSlot,
             Self::GetTransaction,
+            Self::GetTransactionsForAddress,
             Self::GetVersion,
             Self::IsBlockhashValid,
         ]

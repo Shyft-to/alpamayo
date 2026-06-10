@@ -9,6 +9,7 @@ use {
                 ReadResultBlockhashValid, ReadResultBlocks, ReadResultInflationReward,
                 ReadResultLatestBlockhash, ReadResultRecentPrioritizationFees,
                 ReadResultSignatureStatuses, ReadResultSignaturesForAddress, ReadResultTransaction,
+                ReadResultTransactionsForAddress,
             },
             rocksdb::{
                 InflationRewardBaseValue, ReadRequestResultInflationReward,
@@ -62,9 +63,9 @@ use {
     solana_storage_proto::convert::generated,
     solana_transaction::sanitized::MAX_TX_ACCOUNT_LOCKS,
     solana_transaction_status::{
-        BlockEncodingOptions, ConfirmedBlock, ConfirmedTransactionWithStatusMeta, Reward,
-        RewardType, TransactionDetails, TransactionStatus, TransactionWithStatusMeta,
-        UiConfirmedBlock, UiTransactionEncoding,
+        BlockEncodingOptions, ConfirmedBlock, ConfirmedTransactionWithStatusMeta,
+        EncodedTransactionWithStatusMeta, Reward, RewardType, TransactionDetails,
+        TransactionStatus, TransactionWithStatusMeta, UiConfirmedBlock, UiTransactionEncoding,
     },
     std::{
         future::Future,
@@ -94,6 +95,8 @@ pub struct State {
     stored_slots: StoredSlots,
     request_timeout: Duration,
     gsfa_limit: usize,
+    gtfa_limit_signatures: usize,
+    gtfa_limit_full: usize,
     gss_transaction_history: bool,
     grpf_percentile: bool,
     requests_tx: mpsc::Sender<ReadRequest>,
@@ -142,6 +145,8 @@ impl State {
             stored_slots,
             request_timeout: config.request_timeout,
             gsfa_limit: config.gsfa_limit,
+            gtfa_limit_signatures: config.gtfa_limit_signatures,
+            gtfa_limit_full: config.gtfa_limit_full,
             gss_transaction_history: config.gss_transaction_history,
             grpf_percentile: config.grpf_percentile,
             requests_tx,
@@ -272,6 +277,12 @@ pub fn create_request_processor(
     }
     if calls.contains(&ConfigRpcCallJson::GetTransaction) {
         processor.add_handler("getTransaction", Box::new(RpcRequestTransaction::handle));
+    }
+    if calls.contains(&ConfigRpcCallJson::GetTransactionsForAddress) {
+        processor.add_handler(
+            "getTransactionsForAddress",
+            Box::new(RpcRequestTransactionsForAddress::handle),
+        );
     }
     if calls.contains(&ConfigRpcCallJson::GetVersion) {
         processor.add_handler("getVersion", Box::new(RpcRequestVersion::handle));
@@ -2141,6 +2152,569 @@ impl RpcRequestSignaturesForAddress {
             Ok(Ok((self.id, value.into_owned())))
         } else {
             Ok(Ok((self.id, vec![])))
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum GtfaTransactionDetails {
+    #[default]
+    Signatures,
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum GtfaSortOrder {
+    #[default]
+    Desc,
+    Asc,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GtfaComparison {
+    #[serde(default)]
+    gte: Option<i64>,
+    #[serde(default)]
+    gt: Option<i64>,
+    #[serde(default)]
+    lte: Option<i64>,
+    #[serde(default)]
+    lt: Option<i64>,
+    #[serde(default)]
+    eq: Option<i64>,
+}
+
+impl GtfaComparison {
+    fn matches(&self, value: i64) -> bool {
+        self.gte.is_none_or(|bound| value >= bound)
+            && self.gt.is_none_or(|bound| value > bound)
+            && self.lte.is_none_or(|bound| value <= bound)
+            && self.lt.is_none_or(|bound| value < bound)
+            && self.eq.is_none_or(|bound| value == bound)
+    }
+
+    fn lower_bound(&self) -> Option<i64> {
+        match (self.gte, self.gt, self.eq) {
+            (_, _, Some(eq)) => Some(eq),
+            (Some(gte), Some(gt), _) => Some(gte.max(gt.saturating_add(1))),
+            (Some(gte), None, _) => Some(gte),
+            (None, Some(gt), _) => Some(gt.saturating_add(1)),
+            (None, None, _) => None,
+        }
+    }
+
+    fn upper_bound(&self) -> Option<i64> {
+        match (self.lte, self.lt, self.eq) {
+            (_, _, Some(eq)) => Some(eq),
+            (Some(lte), Some(lt), _) => Some(lte.min(lt.saturating_sub(1))),
+            (Some(lte), None, _) => Some(lte),
+            (None, Some(lt), _) => Some(lt.saturating_sub(1)),
+            (None, None, _) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum GtfaStatusFilter {
+    #[default]
+    Any,
+    Succeeded,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum GtfaTokenAccountsFilter {
+    #[default]
+    None,
+    BalanceChanged,
+    All,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GtfaFilters {
+    #[serde(default)]
+    slot: Option<GtfaComparison>,
+    #[serde(default)]
+    block_time: Option<GtfaComparison>,
+    #[serde(default)]
+    signature: Option<GtfaComparison>,
+    #[serde(default)]
+    status: GtfaStatusFilter,
+    #[serde(default)]
+    token_accounts: GtfaTokenAccountsFilter,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GtfaOptions {
+    #[serde(default)]
+    transaction_details: GtfaTransactionDetails,
+    #[serde(default)]
+    sort_order: GtfaSortOrder,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    pagination_token: Option<String>,
+    #[serde(default)]
+    commitment: Option<CommitmentConfig>,
+    #[serde(default)]
+    min_context_slot: Option<Slot>,
+    #[serde(default)]
+    encoding: Option<UiTransactionEncoding>,
+    #[serde(default)]
+    max_supported_transaction_version: Option<u8>,
+    #[serde(default)]
+    filters: Option<GtfaFilters>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GtfaCursor {
+    slot: Slot,
+    transaction_index: usize,
+}
+
+impl GtfaCursor {
+    fn encode(self) -> String {
+        format!("{}:{}", self.slot, self.transaction_index)
+    }
+
+    fn decode(input: &str) -> Result<Self, ErrorObjectOwned> {
+        let invalid = || jsonrpc_error_invalid_params::<()>("Invalid paginationToken", None);
+        let (slot, txidx) = input.split_once(':').ok_or_else(invalid)?;
+        Ok(Self {
+            slot: slot.parse().map_err(|_error| invalid())?,
+            transaction_index: txidx.parse().map_err(|_error| invalid())?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GtfaSignatureEntry {
+    #[serde(flatten)]
+    inner: RpcConfirmedTransactionStatusWithSignature,
+    transaction_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GtfaFullEntry {
+    slot: Slot,
+    transaction_index: Option<usize>,
+    block_time: Option<UnixTimestamp>,
+    #[serde(flatten)]
+    transaction: EncodedTransactionWithStatusMeta,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GtfaResponse<T> {
+    data: Vec<T>,
+    pagination_token: Option<String>,
+}
+
+#[derive(Debug)]
+struct RpcRequestTransactionsForAddress {
+    state: Arc<State>,
+    x_subscription_id: Arc<str>,
+    id: Id<'static>,
+    address: Pubkey,
+    transaction_details: GtfaTransactionDetails,
+    desc: bool,
+    limit: usize,
+    pagination_token: Option<GtfaCursor>,
+    commitment: CommitmentConfig,
+    encoding: UiTransactionEncoding,
+    max_supported_transaction_version: Option<u8>,
+    filters: Option<GtfaFilters>,
+    token_accounts: GtfaTokenAccountsFilter,
+    slot_filter_lower: Option<Slot>,
+    slot_filter_upper: Option<Slot>,
+    block_time_filter_lower: Option<UnixTimestamp>,
+    block_time_filter_upper: Option<UnixTimestamp>,
+}
+
+impl RpcRequestHandler for RpcRequestTransactionsForAddress {
+    fn parse(
+        state: Arc<State>,
+        x_subscription_id: Arc<str>,
+        _upstream_disabled: bool,
+        request: Request<'_>,
+    ) -> Result<Self, Vec<u8>> {
+        #[derive(Debug, Deserialize)]
+        struct ReqParams {
+            address: String,
+            #[serde(default)]
+            options: Option<GtfaOptions>,
+        }
+
+        let (id, ReqParams { address, options }) = parse_params(request)?;
+        let GtfaOptions {
+            transaction_details,
+            sort_order,
+            limit,
+            pagination_token,
+            commitment,
+            min_context_slot,
+            encoding,
+            max_supported_transaction_version,
+            filters,
+        } = options.unwrap_or_default();
+
+        let address = match verify_pubkey(&address) {
+            Ok(address) => address,
+            Err(error) => return Err(jsonrpc_response_error(id, error)),
+        };
+
+        let token_accounts = filters
+            .as_ref()
+            .map(|f| f.token_accounts)
+            .unwrap_or_default();
+
+        let default_limit = match transaction_details {
+            GtfaTransactionDetails::Signatures => state.gtfa_limit_signatures,
+            GtfaTransactionDetails::Full => state.gtfa_limit_full,
+        };
+        let limit = limit.unwrap_or(default_limit);
+        if limit == 0 || limit > default_limit {
+            return Err(jsonrpc_response_error(
+                id,
+                jsonrpc_error_invalid_params::<()>(
+                    format!("Invalid limit; max {default_limit}"),
+                    None,
+                ),
+            ));
+        }
+
+        let pagination_token = match pagination_token {
+            Some(token) => match GtfaCursor::decode(&token) {
+                Ok(cursor) => Some(cursor),
+                Err(error) => return Err(jsonrpc_response_error(id, error)),
+            },
+            None => None,
+        };
+
+        let commitment = commitment.unwrap_or_default();
+        if let Err(error) = check_is_at_least_confirmed(commitment) {
+            return Err(jsonrpc_response_error(id, error));
+        }
+
+        let (id, _slot) = min_context_check(id, min_context_slot, commitment, &state)?;
+
+        let encoding = encoding.unwrap_or(UiTransactionEncoding::Json);
+
+        let (slot_filter_lower, slot_filter_upper) =
+            match filters.as_ref().and_then(|f| f.slot.as_ref()) {
+                Some(cmp) => (
+                    cmp.lower_bound().map(|bound| bound.max(0) as Slot),
+                    cmp.upper_bound().map(|bound| bound.max(0) as Slot),
+                ),
+                None => (None, None),
+            };
+
+        let (block_time_filter_lower, block_time_filter_upper) =
+            match filters.as_ref().and_then(|f| f.block_time.as_ref()) {
+                Some(cmp) => (cmp.lower_bound(), cmp.upper_bound()),
+                None => (None, None),
+            };
+
+        Ok(Self {
+            state,
+            x_subscription_id,
+            id: id.into_owned(),
+            address,
+            transaction_details,
+            desc: matches!(sort_order, GtfaSortOrder::Desc),
+            limit,
+            pagination_token,
+            commitment,
+            encoding,
+            max_supported_transaction_version,
+            filters,
+            token_accounts,
+            slot_filter_lower,
+            slot_filter_upper,
+            block_time_filter_lower,
+            block_time_filter_upper,
+        })
+    }
+
+    async fn process(self) -> RpcRequestResult {
+        let deadline = Instant::now() + self.state.request_timeout;
+
+        // cursor = (slot, transaction_index) — directly maps to stored sfa_index values,
+        let mut storage_cursor: Option<(Slot, u32)> = self
+            .pagination_token
+            .map(|c| (c.slot, c.transaction_index as u32));
+
+        let mut page_cursor: Option<GtfaCursor> = None;
+        let mut storage_finished = false;
+
+        let mut sig_entries = Vec::new();
+        let mut full_entries = Vec::new();
+
+        loop {
+            let collected = sig_entries.len() + full_entries.len();
+            let remaining = self.limit - collected;
+            if remaining == 0 {
+                break;
+            }
+
+            let request_limit = if self.filters.is_some() {
+                remaining
+                    .saturating_mul(4)
+                    .min(self.state.gtfa_limit_signatures)
+                    .max(remaining)
+            } else {
+                remaining
+            };
+
+            let (tx, rx) = oneshot::channel();
+            anyhow::ensure!(
+                self.state
+                    .requests_tx
+                    .send(ReadRequest::TransactionsForAddress {
+                        deadline,
+                        commitment: self.commitment,
+                        address: self.address,
+                        desc: self.desc,
+                        cursor: storage_cursor,
+                        slot_filter_lower: self.slot_filter_lower,
+                        slot_filter_upper: self.slot_filter_upper,
+                        block_time_filter_lower: self.block_time_filter_lower,
+                        block_time_filter_upper: self.block_time_filter_upper,
+                        limit: request_limit,
+                        tx,
+                        x_subscription_id: Arc::clone(&self.x_subscription_id),
+                    })
+                    .await
+                    .is_ok(),
+                "request channel is closed"
+            );
+            let Ok(result) = rx.await else {
+                anyhow::bail!("rx channel is closed");
+            };
+
+            let (batch, batch_txindices, batch_token_flags, finished) = match result {
+                ReadResultTransactionsForAddress::Timeout => anyhow::bail!("timeout"),
+                ReadResultTransactionsForAddress::Transactions {
+                    signatures,
+                    transaction_indices,
+                    token_owner_flags,
+                    finished,
+                } => (signatures, transaction_indices, token_owner_flags, finished),
+                ReadResultTransactionsForAddress::ReadError(error) => {
+                    anyhow::bail!("read error: {error}")
+                }
+            };
+            storage_finished = finished;
+            let batch_was_empty = batch.is_empty();
+            let mut reached_limit = false;
+
+            for ((raw, txidx), flags) in batch
+                .iter()
+                .zip(batch_txindices.iter().copied())
+                .zip(batch_token_flags.iter().copied())
+            {
+                // Always advance storage cursor so next batch resumes after this raw item.
+                storage_cursor = Some((raw.slot, txidx));
+
+                let is_token_owner = flags & 0x01 != 0;
+                let balance_changed = flags & 0x02 != 0;
+                let token_ok = match self.token_accounts {
+                    GtfaTokenAccountsFilter::None => !is_token_owner,
+                    GtfaTokenAccountsFilter::All => true,
+                    GtfaTokenAccountsFilter::BalanceChanged => !is_token_owner || balance_changed,
+                };
+                if !token_ok {
+                    continue;
+                }
+
+                if let Some(filters) = &self.filters {
+                    if let Some(block_time_filter) = &filters.block_time {
+                        match raw.block_time {
+                            Some(block_time) if block_time_filter.matches(block_time) => {}
+                            _ => continue,
+                        }
+                    }
+
+                    let status_ok = match filters.status {
+                        GtfaStatusFilter::Any => true,
+                        GtfaStatusFilter::Succeeded => raw.err.is_none(),
+                        GtfaStatusFilter::Failed => raw.err.is_some(),
+                    };
+                    if !status_ok {
+                        continue;
+                    }
+
+                    if let Some(signature_filter) = &filters.signature {
+                        if !signature_filter.matches(txidx as i64) {
+                            continue;
+                        }
+                    }
+                }
+
+                let transaction_index = Some(txidx as usize);
+
+                match self.transaction_details {
+                    GtfaTransactionDetails::Signatures => {
+                        sig_entries.push(GtfaSignatureEntry {
+                            inner: raw.clone(),
+                            transaction_index,
+                        });
+                    }
+                    GtfaTransactionDetails::Full => {
+                        let signature: Signature = raw.signature.parse().expect("valid signature");
+                        match self
+                            .build_full_entry(
+                                signature,
+                                raw.slot,
+                                raw.block_time,
+                                transaction_index,
+                                deadline,
+                            )
+                            .await?
+                        {
+                            Ok(entry) => full_entries.push(entry),
+                            Err(response) => return Ok(response),
+                        }
+                    }
+                }
+
+                page_cursor = Some(GtfaCursor {
+                    slot: raw.slot,
+                    transaction_index: txidx as usize,
+                });
+
+                if sig_entries.len() + full_entries.len() == self.limit {
+                    reached_limit = true;
+                    break;
+                }
+            }
+
+            if reached_limit || storage_finished || batch_was_empty {
+                break;
+            }
+        }
+
+        let pagination_token = if storage_finished {
+            None
+        } else {
+            page_cursor.map(GtfaCursor::encode)
+        };
+
+        Ok(match self.transaction_details {
+            GtfaTransactionDetails::Signatures => jsonrpc_response_success(
+                self.id,
+                &GtfaResponse {
+                    data: sig_entries,
+                    pagination_token,
+                },
+            ),
+            GtfaTransactionDetails::Full => jsonrpc_response_success(
+                self.id,
+                &GtfaResponse {
+                    data: full_entries,
+                    pagination_token,
+                },
+            ),
+        })
+    }
+}
+
+impl RpcRequestTransactionsForAddress {
+    async fn fetch_transaction(
+        &self,
+        signature: Signature,
+        deadline: Instant,
+    ) -> anyhow::Result<Option<(Slot, Option<UnixTimestamp>, Vec<u8>)>> {
+        let (tx, rx) = oneshot::channel();
+        anyhow::ensure!(
+            self.state
+                .requests_tx
+                .send(ReadRequest::Transaction {
+                    deadline,
+                    signature,
+                    tx,
+                    x_subscription_id: Arc::clone(&self.x_subscription_id),
+                })
+                .await
+                .is_ok(),
+            "request channel is closed"
+        );
+        let Ok(result) = rx.await else {
+            anyhow::bail!("rx channel is closed");
+        };
+
+        Ok(match result {
+            ReadResultTransaction::Timeout => anyhow::bail!("timeout"),
+            ReadResultTransaction::NotFound => None,
+            ReadResultTransaction::Transaction {
+                slot,
+                block_time,
+                bytes,
+            } => Some((slot, block_time, bytes)),
+            ReadResultTransaction::ReadError(error) => anyhow::bail!("read error: {error}"),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn build_full_entry(
+        &self,
+        signature: Signature,
+        index_slot: Slot,
+        index_block_time: Option<UnixTimestamp>,
+        transaction_index: Option<usize>,
+        deadline: Instant,
+    ) -> anyhow::Result<Result<GtfaFullEntry, Vec<u8>>> {
+        let Some((slot, block_time, bytes)) = self.fetch_transaction(signature, deadline).await?
+        else {
+            anyhow::bail!(
+                "transaction {signature} referenced by address index but not found in storage"
+            );
+        };
+        let block_time = block_time.or(index_block_time);
+
+        let tx_with_meta = match generated::ConfirmedTransaction::decode(bytes.as_ref()) {
+            Ok(tx) => match TransactionWithStatusMeta::try_from(tx) {
+                Ok(tx_with_meta) => tx_with_meta,
+                Err(error) => {
+                    error!(slot, ?error, "failed to decode transaction");
+                    anyhow::bail!("failed to decode transaction")
+                }
+            },
+            Err(error) => {
+                error!(
+                    slot,
+                    ?error,
+                    "failed to decode transaction protobuf / bincode"
+                );
+                anyhow::bail!("failed to decode transaction protobuf / bincode")
+            }
+        };
+
+        let confirmed_tx = ConfirmedTransactionWithStatusMeta {
+            slot,
+            tx_with_meta,
+            block_time,
+        };
+        match confirmed_tx.encode(self.encoding, self.max_supported_transaction_version) {
+            Ok(encoded) => Ok(Ok(GtfaFullEntry {
+                slot: index_slot,
+                transaction_index,
+                block_time,
+                transaction: encoded.transaction,
+            })),
+            Err(error) => Ok(Err(jsonrpc_response_error_custom(
+                self.id.clone(),
+                RpcCustomError::from(error),
+            ))),
         }
     }
 }
