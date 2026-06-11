@@ -1280,6 +1280,12 @@ enum ReadRequest {
             )>,
         >,
     },
+    SfaPosition {
+        address: Pubkey,
+        slot: Slot,
+        signature: Signature,
+        tx: oneshot::Sender<anyhow::Result<Option<u32>>>,
+    },
     SignatureStatuses {
         signatures: Vec<Signature>,
         tx: oneshot::Sender<anyhow::Result<Vec<(Signature, TransactionIndexValue<'static>)>>>,
@@ -1362,6 +1368,16 @@ impl RocksdbRead {
                         ))
                         .is_err();
                 }
+                ReadRequest::SfaPosition {
+                    address,
+                    slot,
+                    signature,
+                    tx,
+                } => {
+                    let _ = tx
+                        .send(Self::spawn_sfa_position(&db, address, slot, signature))
+                        .is_err();
+                }
                 ReadRequest::SignatureStatuses { signatures, tx } => {
                     let _ = tx
                         .send(Self::spawn_signature_statuses(&db, signatures))
@@ -1411,6 +1427,29 @@ impl RocksdbRead {
             current_slot = Some(slot);
         }
         Ok(slots)
+    }
+
+    fn spawn_sfa_position(
+        db: &DB,
+        address: Pubkey,
+        slot: Slot,
+        signature: Signature,
+    ) -> anyhow::Result<Option<u32>> {
+        let key = SfaIndex::encode(&address, slot);
+        let Some(value) = db
+            .get_pinned_cf(Rocksdb::cf_handle::<SfaIndex>(db), key)
+            .context("failed to get sfa_index")?
+        else {
+            return Ok(None);
+        };
+
+        let mut slice = value.as_ref();
+        while let Some(sigstatus) = SfaIndexValue::decode(&mut slice)? {
+            if sigstatus.signature == signature {
+                return Ok(Some(sigstatus.transaction_index));
+            }
+        }
+        Ok(None)
     }
 
     fn spawn_signatires_for_address(
@@ -1681,6 +1720,27 @@ impl RocksdbRead {
         Ok(Box::pin(async move {
             rx.await
                 .context("failed to get ReadRequest::Transaction request result")?
+        }))
+    }
+
+    pub fn read_sfa_position(
+        &self,
+        address: Pubkey,
+        slot: Slot,
+        signature: Signature,
+    ) -> anyhow::Result<BoxFuture<'static, anyhow::Result<Option<u32>>>> {
+        let (tx, rx) = oneshot::channel();
+        self.req_tx
+            .send(ReadRequest::SfaPosition {
+                address,
+                slot,
+                signature,
+                tx,
+            })
+            .context("failed to send ReadRequest::SfaPosition request")?;
+        Ok(Box::pin(async move {
+            rx.await
+                .context("failed to get ReadRequest::SfaPosition request result")?
         }))
     }
 

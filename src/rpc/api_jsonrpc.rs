@@ -8,7 +8,8 @@ use {
                 ReadRequest, ReadResultBlock, ReadResultBlockHeight, ReadResultBlockTime,
                 ReadResultBlockhashValid, ReadResultBlocks, ReadResultInflationReward,
                 ReadResultLatestBlockhash, ReadResultRecentPrioritizationFees,
-                ReadResultSignatureStatuses, ReadResultSignaturesForAddress, ReadResultTransaction,
+                ReadResultSignaturePosition, ReadResultSignatureStatuses,
+                ReadResultSignaturesForAddress, ReadResultTransaction,
                 ReadResultTransactionsForAddress,
             },
             rocksdb::{
@@ -2238,13 +2239,78 @@ enum GtfaTokenAccountsFilter {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GtfaSignatureComparison {
+    #[serde(default)]
+    gte: Option<String>,
+    #[serde(default)]
+    gt: Option<String>,
+    #[serde(default)]
+    lte: Option<String>,
+    #[serde(default)]
+    lt: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct GtfaSignatureFilter {
+    gte: Option<Signature>,
+    gt: Option<Signature>,
+    lte: Option<Signature>,
+    lt: Option<Signature>,
+}
+
+impl GtfaSignatureFilter {
+    fn parse(raw: &GtfaSignatureComparison) -> Result<Self, ErrorObjectOwned> {
+        Ok(Self {
+            gte: raw.gte.as_deref().map(verify_signature).transpose()?,
+            gt: raw.gt.as_deref().map(verify_signature).transpose()?,
+            lte: raw.lte.as_deref().map(verify_signature).transpose()?,
+            lt: raw.lt.as_deref().map(verify_signature).transpose()?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct GtfaSignaturePositionFilter {
+    gte: Option<(Slot, u32)>,
+    gt: Option<(Slot, u32)>,
+    lte: Option<(Slot, u32)>,
+    lt: Option<(Slot, u32)>,
+}
+
+impl GtfaSignaturePositionFilter {
+    fn matches(&self, position: (Slot, u32)) -> bool {
+        self.gte.is_none_or(|bound| position >= bound)
+            && self.gt.is_none_or(|bound| position > bound)
+            && self.lte.is_none_or(|bound| position <= bound)
+            && self.lt.is_none_or(|bound| position < bound)
+    }
+
+    fn lower_slot(&self) -> Option<Slot> {
+        match (self.gte, self.gt) {
+            (Some(a), Some(b)) => Some(a.0.max(b.0)),
+            (Some(bound), None) | (None, Some(bound)) => Some(bound.0),
+            (None, None) => None,
+        }
+    }
+
+    fn upper_slot(&self) -> Option<Slot> {
+        match (self.lte, self.lt) {
+            (Some(a), Some(b)) => Some(a.0.min(b.0)),
+            (Some(bound), None) | (None, Some(bound)) => Some(bound.0),
+            (None, None) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct GtfaFilters {
     #[serde(default)]
     slot: Option<GtfaComparison>,
     #[serde(default)]
     block_time: Option<GtfaComparison>,
     #[serde(default)]
-    signature: Option<GtfaComparison>,
+    signature: Option<GtfaSignatureComparison>,
     #[serde(default)]
     status: GtfaStatusFilter,
     #[serde(default)]
@@ -2339,6 +2405,7 @@ struct RpcRequestTransactionsForAddress {
     slot_filter_upper: Option<Slot>,
     block_time_filter_lower: Option<UnixTimestamp>,
     block_time_filter_upper: Option<UnixTimestamp>,
+    signature_filter: Option<GtfaSignatureFilter>,
 }
 
 impl RpcRequestHandler for RpcRequestTransactionsForAddress {
@@ -2425,6 +2492,14 @@ impl RpcRequestHandler for RpcRequestTransactionsForAddress {
                 None => (None, None),
             };
 
+        let signature_filter = match filters.as_ref().and_then(|f| f.signature.as_ref()) {
+            Some(cmp) => match GtfaSignatureFilter::parse(cmp) {
+                Ok(filter) => Some(filter),
+                Err(error) => return Err(jsonrpc_response_error(id, error)),
+            },
+            None => None,
+        };
+
         Ok(Self {
             state,
             x_subscription_id,
@@ -2443,6 +2518,7 @@ impl RpcRequestHandler for RpcRequestTransactionsForAddress {
             slot_filter_upper,
             block_time_filter_lower,
             block_time_filter_upper,
+            signature_filter,
         })
     }
 
@@ -2459,6 +2535,58 @@ impl RpcRequestHandler for RpcRequestTransactionsForAddress {
 
         let mut sig_entries = Vec::new();
         let mut full_entries = Vec::new();
+
+        let signature_position_filter = match &self.signature_filter {
+            Some(filter) => {
+                let mut resolved = GtfaSignaturePositionFilter::default();
+
+                if let Some(signature) = filter.gte {
+                    match self.resolve_signature_position(signature, deadline).await? {
+                        Some(position) => resolved.gte = Some(position),
+                        None => return Ok(self.empty_response()),
+                    }
+                }
+                if let Some(signature) = filter.gt {
+                    match self.resolve_signature_position(signature, deadline).await? {
+                        Some(position) => resolved.gt = Some(position),
+                        None => return Ok(self.empty_response()),
+                    }
+                }
+                if let Some(signature) = filter.lte {
+                    match self.resolve_signature_position(signature, deadline).await? {
+                        Some(position) => resolved.lte = Some(position),
+                        None => return Ok(self.empty_response()),
+                    }
+                }
+                if let Some(signature) = filter.lt {
+                    match self.resolve_signature_position(signature, deadline).await? {
+                        Some(position) => resolved.lt = Some(position),
+                        None => return Ok(self.empty_response()),
+                    }
+                }
+
+                Some(resolved)
+            }
+            None => None,
+        };
+
+        // refine the slot range with bounds derived from the resolved signature positions
+        let slot_filter_lower = match (
+            self.slot_filter_lower,
+            signature_position_filter.and_then(|f| f.lower_slot()),
+        ) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(bound), None) | (None, Some(bound)) => Some(bound),
+            (None, None) => None,
+        };
+        let slot_filter_upper = match (
+            self.slot_filter_upper,
+            signature_position_filter.and_then(|f| f.upper_slot()),
+        ) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(bound), None) | (None, Some(bound)) => Some(bound),
+            (None, None) => None,
+        };
 
         loop {
             let collected = sig_entries.len() + full_entries.len();
@@ -2486,8 +2614,8 @@ impl RpcRequestHandler for RpcRequestTransactionsForAddress {
                         address: self.address,
                         desc: self.desc,
                         cursor: storage_cursor,
-                        slot_filter_lower: self.slot_filter_lower,
-                        slot_filter_upper: self.slot_filter_upper,
+                        slot_filter_lower,
+                        slot_filter_upper,
                         block_time_filter_lower: self.block_time_filter_lower,
                         block_time_filter_upper: self.block_time_filter_upper,
                         limit: request_limit,
@@ -2555,12 +2683,12 @@ impl RpcRequestHandler for RpcRequestTransactionsForAddress {
                     if !status_ok {
                         continue;
                     }
+                }
 
-                    if let Some(signature_filter) = &filters.signature {
-                        if !signature_filter.matches(txidx as i64) {
-                            continue;
-                        }
-                    }
+                if let Some(position_filter) = &signature_position_filter
+                    && !position_filter.matches((raw.slot, txidx))
+                {
+                    continue;
                 }
 
                 let transaction_index = Some(txidx as usize);
@@ -2643,6 +2771,46 @@ impl RpcRequestHandler for RpcRequestTransactionsForAddress {
 }
 
 impl RpcRequestTransactionsForAddress {
+    async fn resolve_signature_position(
+        &self,
+        signature: Signature,
+        deadline: Instant,
+    ) -> anyhow::Result<Option<(Slot, u32)>> {
+        let (tx, rx) = oneshot::channel();
+        anyhow::ensure!(
+            self.state
+                .requests_tx
+                .send(ReadRequest::SignaturePosition {
+                    deadline,
+                    address: self.address,
+                    signature,
+                    tx,
+                    x_subscription_id: Arc::clone(&self.x_subscription_id),
+                })
+                .await
+                .is_ok(),
+            "request channel is closed"
+        );
+        let Ok(result) = rx.await else {
+            anyhow::bail!("rx channel is closed");
+        };
+        match result {
+            ReadResultSignaturePosition::Position(position) => Ok(position),
+            ReadResultSignaturePosition::Timeout => anyhow::bail!("timeout"),
+            ReadResultSignaturePosition::ReadError(error) => anyhow::bail!("read error: {error}"),
+        }
+    }
+
+    fn empty_response(&self) -> Vec<u8> {
+        jsonrpc_response_success(
+            self.id.clone(),
+            &GtfaResponse::<GtfaSignatureEntry> {
+                data: vec![],
+                pagination_token: None,
+            },
+        )
+    }
+
     async fn fetch_transaction(
         &self,
         signature: Signature,
