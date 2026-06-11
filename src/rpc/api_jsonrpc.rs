@@ -2535,6 +2535,7 @@ impl RpcRequestHandler for RpcRequestTransactionsForAddress {
 
         let mut sig_entries = Vec::new();
         let mut full_entries = Vec::new();
+        let mut reached_limit = false;
 
         let signature_position_filter = match &self.signature_filter {
             Some(filter) => {
@@ -2644,7 +2645,7 @@ impl RpcRequestHandler for RpcRequestTransactionsForAddress {
             };
             storage_finished = finished;
             let batch_was_empty = batch.is_empty();
-            let mut reached_limit = false;
+            reached_limit = false;
 
             let mut pending_full = Vec::new();
 
@@ -2745,7 +2746,7 @@ impl RpcRequestHandler for RpcRequestTransactionsForAddress {
             }
         }
 
-        let pagination_token = if storage_finished {
+        let pagination_token = if storage_finished && !reached_limit {
             None
         } else {
             page_cursor.map(GtfaCursor::encode)
