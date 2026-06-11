@@ -529,6 +529,15 @@ pub enum ReadResultTransaction {
 }
 
 #[derive(Debug)]
+pub enum ReadResultSignaturePosition {
+    Timeout,
+    /// Resolved `(slot, transaction_index)` of the signature within `address`'s history,
+    /// or `None` if the signature isn't part of it.
+    Position(Option<(Slot, u32)>),
+    ReadError(anyhow::Error),
+}
+
+#[derive(Debug)]
 pub enum ReadResultBlockhashValid {
     Timeout,
     Blockhash { slot: Slot, is_valid: bool },
@@ -661,6 +670,21 @@ pub enum ReadRequest {
         deadline: Instant,
         index: TransactionIndexValue<'static>,
         tx: oneshot::Sender<ReadResultTransaction>,
+        x_subscription_id: Arc<str>,
+    },
+    SignaturePosition {
+        deadline: Instant,
+        address: Pubkey,
+        signature: Signature,
+        tx: oneshot::Sender<ReadResultSignaturePosition>,
+        x_subscription_id: Arc<str>,
+    },
+    SignaturePosition2 {
+        deadline: Instant,
+        address: Pubkey,
+        slot: Slot,
+        signature: Signature,
+        tx: oneshot::Sender<ReadResultSignaturePosition>,
         x_subscription_id: Arc<str>,
     },
     BlockhashValid {
@@ -1717,6 +1741,98 @@ impl ReadRequest {
                             ReadResultTransaction::ReadError(anyhow::Error::new(error))
                         }
                         Err(_error) => ReadResultTransaction::Timeout,
+                    };
+                    let _ = tx.send(result);
+                    None
+                }))
+            }
+            Self::SignaturePosition {
+                deadline,
+                address,
+                signature,
+                tx,
+                x_subscription_id,
+            } => {
+                if deadline < Instant::now() {
+                    let _ = tx.send(ReadResultSignaturePosition::Timeout);
+                    return None;
+                }
+
+                let read_fut = match db_read.read_tx_index(signature) {
+                    Ok(fut) => fut,
+                    Err(error) => {
+                        let _ = tx.send(ReadResultSignaturePosition::ReadError(error));
+                        return None;
+                    }
+                };
+
+                Some(Box::pin(async move {
+                    let ts = quanta::Instant::now();
+                    let result = timeout_at(deadline.into(), read_fut).await;
+                    gauge!(
+                        READ_DISK_SECONDS_TOTAL,
+                        "x_subscription_id" => Arc::clone(&x_subscription_id),
+                        "type" => "index_tx",
+                    )
+                    .increment(duration_to_seconds(ts.elapsed()));
+
+                    let result = match result {
+                        Ok(Ok(Some(index))) => {
+                            return Some(ReadRequest::SignaturePosition2 {
+                                deadline,
+                                address,
+                                slot: index.slot,
+                                signature,
+                                tx,
+                                x_subscription_id,
+                            });
+                        }
+                        Ok(Ok(None)) => ReadResultSignaturePosition::Position(None),
+                        Ok(Err(error)) => ReadResultSignaturePosition::ReadError(error),
+                        Err(_error) => ReadResultSignaturePosition::Timeout,
+                    };
+
+                    let _ = tx.send(result);
+                    None
+                }))
+            }
+            Self::SignaturePosition2 {
+                deadline,
+                address,
+                slot,
+                signature,
+                tx,
+                x_subscription_id,
+            } => {
+                if deadline < Instant::now() {
+                    let _ = tx.send(ReadResultSignaturePosition::Timeout);
+                    return None;
+                }
+
+                let read_fut = match db_read.read_sfa_position(address, slot, signature) {
+                    Ok(fut) => fut,
+                    Err(error) => {
+                        let _ = tx.send(ReadResultSignaturePosition::ReadError(error));
+                        return None;
+                    }
+                };
+
+                Some(Box::pin(async move {
+                    let ts = quanta::Instant::now();
+                    let result = timeout_at(deadline.into(), read_fut).await;
+                    gauge!(
+                        READ_DISK_SECONDS_TOTAL,
+                        "x_subscription_id" => x_subscription_id,
+                        "type" => "index_sfa",
+                    )
+                    .increment(duration_to_seconds(ts.elapsed()));
+
+                    let result = match result {
+                        Ok(Ok(position)) => ReadResultSignaturePosition::Position(
+                            position.map(|txidx| (slot, txidx)),
+                        ),
+                        Ok(Err(error)) => ReadResultSignaturePosition::ReadError(error),
+                        Err(_error) => ReadResultSignaturePosition::Timeout,
                     };
                     let _ = tx.send(result);
                     None
