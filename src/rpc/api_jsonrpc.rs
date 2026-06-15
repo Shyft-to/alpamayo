@@ -105,7 +105,7 @@ pub struct State {
     db_write_inflation_reward: RocksdbWriteInflationReward,
     upstreams: Vec<RpcClientJsonrpc>,
     workers: Sender<WorkRequest>,
-    cluster_confirmed_slot: Arc<AtomicU64>,
+    cluster_processed_slot: Arc<AtomicU64>,
     health_check_slot_distance: u64,
 }
 
@@ -116,7 +116,7 @@ impl State {
         requests_tx: mpsc::Sender<ReadRequest>,
         db_write_inflation_reward: RocksdbWriteInflationReward,
         workers: Sender<WorkRequest>,
-        cluster_confirmed_slot: Arc<AtomicU64>,
+        cluster_processed_slot: Arc<AtomicU64>,
     ) -> anyhow::Result<Self> {
         let upstreams = config
             .upstream_jsonrpc
@@ -155,7 +155,7 @@ impl State {
             db_write_inflation_reward,
             upstreams,
             workers,
-            cluster_confirmed_slot,
+            cluster_processed_slot,
             health_check_slot_distance: config.health_check.slot_distance,
         })
     }
@@ -185,7 +185,7 @@ pub fn create_request_processor(
         workers,
         Arc::new(AtomicU64::new(0)),
     )?;
-    let poller_slot = needs_poller.then(|| Arc::clone(&state.cluster_confirmed_slot));
+    let poller_slot = needs_poller.then(|| Arc::clone(&state.cluster_processed_slot));
     let mut processor =
         RpcRequestsProcessor::new(config.body_limit, Arc::new(state), config.extra_headers);
     if calls.contains(&ConfigRpcCallJson::GetBlock) {
@@ -226,7 +226,7 @@ pub fn create_request_processor(
                 let client = RpcClient::new_sender(sender, RpcClientConfig::default());
                 loop {
                     let value = match client
-                        .get_slot_with_commitment(CommitmentConfig::confirmed())
+                        .get_slot_with_commitment(CommitmentConfig::processed())
                         .await
                     {
                         Ok(slot) => slot,
@@ -3388,11 +3388,11 @@ impl RpcRequestHandler for RpcRequestHealth {
         request: Request<'_>,
     ) -> Result<Self, Vec<u8>> {
         let request = no_params_expected(request)?;
-        let cluster_slot = state.cluster_confirmed_slot.load(Ordering::Relaxed);
+        let cluster_slot = state.cluster_processed_slot.load(Ordering::Relaxed);
         if cluster_slot == 0 {
             return Err(jsonrpc_response_success(request.id, "ok"));
         }
-        let local_slot = state.stored_slots.confirmed_load();
+        let local_slot = state.stored_slots.processed_load();
         if local_slot >= cluster_slot.saturating_sub(state.health_check_slot_distance) {
             Err(jsonrpc_response_success(request.id, "ok"))
         } else {
