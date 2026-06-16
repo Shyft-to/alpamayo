@@ -106,12 +106,19 @@ impl HttpSource {
             .httpget
             .map(|url| {
                 let url = Url::parse(&url)?;
-                let client = Client::builder().timeout(config.timeout).build()?;
+                let client = Client::builder()
+                    .timeout(config.timeout)
+                    .user_agent(&config.user_agent)
+                    .build()?;
                 Ok::<_, ConnectError>((url, client))
             })
             .transpose()?;
 
-        let sender = HttpSender::new_with_timeout(config.rpc, config.timeout);
+        let rpc_client = Client::builder()
+            .timeout(config.timeout)
+            .user_agent(&config.user_agent)
+            .build()?;
+        let sender = HttpSender::new_with_client(config.rpc, rpc_client);
         let client = RpcClient::new_sender(sender, RpcClientConfig::default());
 
         let version = client.get_version().await?;
