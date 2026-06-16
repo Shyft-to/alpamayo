@@ -106,7 +106,10 @@ impl HttpSource {
             .httpget
             .map(|url| {
                 let url = Url::parse(&url)?;
-                let client = Client::builder().timeout(config.timeout).build()?;
+                let client = Client::builder()
+                    .timeout(config.timeout)
+                    .user_agent(&config.user_agent)
+                    .build()?;
                 Ok::<_, ConnectError>((url, client))
             })
             .transpose()?;

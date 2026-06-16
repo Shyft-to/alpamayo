@@ -94,6 +94,8 @@ pub struct ConfigSourceHttp {
     pub timeout: Duration,
     #[serde(deserialize_with = "deserialize_num_str")]
     pub concurrency: usize,
+    #[serde(default = "ConfigSourceHttp::default_user_agent")]
+    pub user_agent: String,
 }
 
 impl Default for ConfigSourceHttp {
@@ -103,7 +105,14 @@ impl Default for ConfigSourceHttp {
             httpget: None,
             timeout: Duration::from_secs(30),
             concurrency: 10,
+            user_agent: Self::default_user_agent(),
         }
+    }
+}
+
+impl ConfigSourceHttp {
+    fn default_user_agent() -> String {
+        format!("alpamayo/v{}", VERSION.package)
     }
 }
 
