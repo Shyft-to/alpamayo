@@ -1327,7 +1327,11 @@ impl ReadRequest {
                     );
                     (start, slot_filter_lower)
                 } else {
-                    let start = cursor.map_or(slot_filter_lower.unwrap_or(0), |(slot, _)| slot);
+                    let first_available = blocks.get_back_slot().unwrap_or(0);
+                    let start = cursor.map_or(
+                        slot_filter_lower.unwrap_or(0).max(first_available),
+                        |(slot, _)| slot,
+                    );
                     let stop = slot_filter_upper
                         .map_or(commitment_slot, |bound| bound.min(commitment_slot));
                     (start, Some(stop))
