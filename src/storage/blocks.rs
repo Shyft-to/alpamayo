@@ -362,6 +362,11 @@ impl StoredBlocksRead {
             .map(|((_, slot), _)| *slot)
     }
 
+    pub fn get_back_slot(&self) -> Option<Slot> {
+        let tail = self.blocks[self.tail];
+        tail.exists.then_some(tail.slot)
+    }
+
     pub fn get_block_location(&self, slot: Slot) -> StorageBlockLocationResult {
         let tail = self.blocks[self.tail];
         if !tail.exists || tail.slot > slot {
