@@ -368,6 +368,13 @@ impl Stream for StreamSource {
                                 slot_info.status = SlotStatusProto::SlotConfirmed;
                                 parent
                             }
+                            (
+                                Some(_),
+                                SlotStatusProto::SlotConfirmed,
+                                SlotStatusProto::SlotConfirmed,
+                            ) => {
+                                continue;
+                            }
                             _ => {
                                 return Poll::Ready(Some(Err(RecvError::UnexpectedCommitment(
                                     slot_info.status,
