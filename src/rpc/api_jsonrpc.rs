@@ -82,8 +82,16 @@ use {
         task::spawn_blocking,
         time::sleep,
     },
-    tracing::error,
+    tracing::{debug, error},
 };
+
+// reasons why a request is forwarded to upstream, used as the "reason" metric label
+const REASON_BELOW_RETENTION: &str = "below_retention"; // slot/data fell outside local storage retention window
+const REASON_REMOVED: &str = "removed"; // local storage evicted the slot while the read was in flight
+const REASON_NOT_FOUND_LOCALLY: &str = "not_found_locally"; // not present in local storage at all
+const REASON_INCOMPLETE_RESULTS: &str = "incomplete_results"; // local storage couldn't fill the requested limit
+const REASON_MISSING_STATUS: &str = "missing_status"; // signature status missing locally and history search requested
+const REASON_ALWAYS: &str = "always"; // method has no local source, always served from upstream
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -526,7 +534,7 @@ impl RpcRequestHandler for RpcRequestBlock {
             return Ok(Self::error_not_available(self.id, self.slot));
         }
         if self.slot <= self.state.stored_slots.first_available_load() {
-            return self.fetch_upstream(deadline).await;
+            return self.fetch_upstream(deadline, REASON_BELOW_RETENTION).await;
         }
 
         // request
@@ -550,7 +558,7 @@ impl RpcRequestHandler for RpcRequestBlock {
         let bytes = match result {
             ReadResultBlock::Timeout => anyhow::bail!("timeout"),
             ReadResultBlock::Removed => {
-                return self.fetch_upstream(deadline).await;
+                return self.fetch_upstream(deadline, REASON_REMOVED).await;
             }
             ReadResultBlock::Dead => {
                 return Ok(Self::error_skipped(self.id, self.slot));
@@ -564,7 +572,7 @@ impl RpcRequestHandler for RpcRequestBlock {
 
         // verify that we still have data for that block (i.e. we read correct data)
         if self.slot <= self.state.stored_slots.first_available_load() {
-            return self.fetch_upstream(deadline).await;
+            return self.fetch_upstream(deadline, REASON_BELOW_RETENTION).await;
         }
 
         // parse, encode and serialize
@@ -573,7 +581,8 @@ impl RpcRequestHandler for RpcRequestBlock {
 }
 
 impl RpcRequestBlock {
-    async fn fetch_upstream(self, deadline: Instant) -> RpcRequestResult {
+    async fn fetch_upstream(self, deadline: Instant, reason: &'static str) -> RpcRequestResult {
+        debug!(self.slot, reason = ?reason, "getBlock slot going upstream");
         if self.upstream_disabled {
             return Ok(jsonrpc_response_success(self.id, None::<()>));
         }
@@ -588,6 +597,7 @@ impl RpcRequestBlock {
                     self.commitment,
                     self.encoding,
                     self.encoding_options,
+                    reason,
                 )
                 .await
         } else {
@@ -884,6 +894,7 @@ impl RpcRequestHandler for RpcRequestBlocks {
                     self.start_slot,
                     self.until,
                     self.commitment,
+                    REASON_BELOW_RETENTION,
                 )
                 .await;
         }
@@ -1066,7 +1077,7 @@ impl RpcRequestHandler for RpcRequestBlockTime {
         let response = match result {
             ReadResultBlockTime::Timeout => anyhow::bail!("timeout"),
             ReadResultBlockTime::Removed => {
-                return self.fetch_upstream(deadline).await;
+                return self.fetch_upstream(deadline, REASON_REMOVED).await;
             }
             ReadResultBlockTime::Dead => Err(RpcCustomError::SlotSkipped { slot: self.slot }),
             ReadResultBlockTime::NotAvailable => {
@@ -1084,14 +1095,20 @@ impl RpcRequestHandler for RpcRequestBlockTime {
 }
 
 impl RpcRequestBlockTime {
-    async fn fetch_upstream(self, deadline: Instant) -> RpcRequestResult {
+    async fn fetch_upstream(self, deadline: Instant, reason: &'static str) -> RpcRequestResult {
         if self.upstream_disabled {
             return Ok(jsonrpc_response_success(self.id, None::<()>));
         }
 
         if let Some(upstream) = self.state.get_upstream(ConfigRpcCallJson::GetBlockTime) {
             upstream
-                .get_block_time(self.x_subscription_id, deadline, &self.id, self.slot)
+                .get_block_time(
+                    self.x_subscription_id,
+                    deadline,
+                    &self.id,
+                    self.slot,
+                    reason,
+                )
                 .await
         } else {
             Ok(jsonrpc_response_success(self.id, json!(None::<()>)))
@@ -1129,7 +1146,7 @@ impl RpcRequestHandler for RpcRequestClusterNodes {
         };
 
         upstream
-            .get_cluster_nodes(self.x_subscription_id, deadline, self.id)
+            .get_cluster_nodes(self.x_subscription_id, deadline, self.id, REASON_ALWAYS)
             .await
     }
 }
@@ -1169,7 +1186,12 @@ impl RpcRequestHandler for RpcRequestFirstAvailableBlock {
             .flatten()
         {
             upstream
-                .get_first_available_block(self.x_subscription_id, deadline, &self.id)
+                .get_first_available_block(
+                    self.x_subscription_id,
+                    deadline,
+                    &self.id,
+                    REASON_ALWAYS,
+                )
                 .await
         } else {
             Ok(jsonrpc_response_success(
@@ -1508,6 +1530,7 @@ impl RpcRequestInflationReward {
                     &self.id,
                     start_slot,
                     limit,
+                    REASON_BELOW_RETENTION,
                 )
                 .await
                 .map_err(|error| anyhow::anyhow!(error));
@@ -1546,7 +1569,9 @@ impl RpcRequestInflationReward {
         slot: Slot,
     ) -> anyhow::Result<Result<UiConfirmedBlock, Vec<u8>>> {
         if slot <= self.state.stored_slots.first_available_load() {
-            return self.get_block_with_rewards_upstream(deadline, slot).await;
+            return self
+                .get_block_with_rewards_upstream(deadline, slot, REASON_BELOW_RETENTION)
+                .await;
         }
 
         // request
@@ -1570,7 +1595,9 @@ impl RpcRequestInflationReward {
         let bytes = match result {
             ReadResultBlock::Timeout => anyhow::bail!("timeout"),
             ReadResultBlock::Removed => {
-                return self.get_block_with_rewards_upstream(deadline, slot).await;
+                return self
+                    .get_block_with_rewards_upstream(deadline, slot, REASON_REMOVED)
+                    .await;
             }
             ReadResultBlock::Dead => {
                 return Ok(Err(RpcRequestBlock::error_skipped(self.id.clone(), slot)));
@@ -1587,7 +1614,9 @@ impl RpcRequestInflationReward {
 
         // verify that we still have data for that block (i.e. we read correct data)
         if slot <= self.state.stored_slots.first_available_load() {
-            return self.get_block_with_rewards_upstream(deadline, slot).await;
+            return self
+                .get_block_with_rewards_upstream(deadline, slot, REASON_BELOW_RETENTION)
+                .await;
         }
 
         // parse and encode
@@ -1608,6 +1637,7 @@ impl RpcRequestInflationReward {
         &self,
         deadline: Instant,
         slot: Slot,
+        reason: &'static str,
     ) -> anyhow::Result<Result<UiConfirmedBlock, Vec<u8>>> {
         if let Some(upstream) = (!self.upstream_disabled)
             .then(|| self.state.get_upstream(ConfigRpcCallJson::GetBlock))
@@ -1619,6 +1649,7 @@ impl RpcRequestInflationReward {
                     deadline,
                     &self.id,
                     slot,
+                    reason,
                 )
                 .await
             {
@@ -1871,6 +1902,7 @@ impl RpcRequestHandler for RpcRequestLeaderSchedule {
                 self.slot,
                 self.is_processed,
                 self.identity,
+                REASON_ALWAYS,
             )
             .await
     }
@@ -2139,6 +2171,7 @@ impl RpcRequestSignaturesForAddress {
                     self.until,
                     limit,
                     self.commitment,
+                    REASON_INCOMPLETE_RESULTS,
                 )
                 .await?;
 
@@ -3069,6 +3102,7 @@ impl RpcRequestSignatureStatuses {
                     deadline,
                     &self.id,
                     signatures,
+                    REASON_MISSING_STATUS,
                 )
                 .await?;
 
@@ -3221,7 +3255,9 @@ impl RpcRequestHandler for RpcRequestTransaction {
         let (slot, block_time, bytes) = match result {
             ReadResultTransaction::Timeout => anyhow::bail!("timeout"),
             ReadResultTransaction::NotFound => {
-                return self.fetch_upstream(deadline).await;
+                return self
+                    .fetch_upstream(deadline, REASON_NOT_FOUND_LOCALLY)
+                    .await;
             }
             ReadResultTransaction::Transaction {
                 slot,
@@ -3238,7 +3274,7 @@ impl RpcRequestHandler for RpcRequestTransaction {
 
         // verify that we still have data for that block (i.e. we read correct data)
         if slot <= self.state.stored_slots.first_available_load() {
-            return self.fetch_upstream(deadline).await;
+            return self.fetch_upstream(deadline, REASON_BELOW_RETENTION).await;
         }
 
         // parse, encode and serialize
@@ -3250,7 +3286,8 @@ impl RpcRequestHandler for RpcRequestTransaction {
 }
 
 impl RpcRequestTransaction {
-    async fn fetch_upstream(self, deadline: Instant) -> RpcRequestResult {
+    async fn fetch_upstream(self, deadline: Instant, reason: &'static str) -> RpcRequestResult {
+        debug!(%self.signature, reason = ?reason, "getTransaction signature going upstream");
         if self.upstream_disabled {
             return Ok(jsonrpc_response_success(self.id, None::<()>));
         }
@@ -3265,6 +3302,7 @@ impl RpcRequestTransaction {
                     self.commitment,
                     self.encoding,
                     self.max_supported_transaction_version,
+                    reason,
                 )
                 .await
         } else {

@@ -134,6 +134,7 @@ pub fn start(
                                                     block,
                                                     slot,
                                                     config.index_vote_transactions,
+                                                    None
                                                 ),
                                             ),
                                         )),

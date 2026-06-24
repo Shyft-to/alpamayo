@@ -7,6 +7,7 @@ use {
     futures::{StreamExt, ready, stream::Stream},
     maplit::hashmap,
     metrics::gauge,
+    quanta::Instant,
     richat_client::{grpc::GrpcClientBuilderError, stream::SubscribeStream},
     richat_proto::{
         convert_from::{create_reward, create_tx_with_meta},
@@ -89,6 +90,7 @@ struct SlotInfo {
     sealed: bool,
     ignore_block_build_fail: bool,
     index_vote: bool,
+    created_at: Instant,
 }
 
 impl Drop for SlotInfo {
@@ -120,6 +122,7 @@ impl SlotInfo {
             sealed: false,
             ignore_block_build_fail: false,
             index_vote,
+            created_at: Instant::now(),
         }
     }
 
@@ -166,6 +169,8 @@ impl SlotInfo {
             block_meta.block_time.map(|obj| obj.timestamp),
             block_meta.block_height.map(|obj| obj.block_height),
             self.index_vote,
+            self.created_at,
+            None,
         )))
     }
 }
