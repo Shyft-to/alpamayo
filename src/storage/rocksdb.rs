@@ -40,7 +40,7 @@ use {
         thread::{Builder, JoinHandle},
     },
     tokio::sync::{broadcast, oneshot},
-    tracing::{error, info},
+    tracing::{debug, error, info},
 };
 
 thread_local! {
@@ -690,6 +690,8 @@ enum WriteRequest {
     SlotAdd {
         slot: Slot,
         data: Option<(Arc<BlockWithBinary>, StorageId, u64)>,
+        _slot_arrived: Instant,
+        fetched_at: Option<Instant>,
         tx: oneshot::Sender<anyhow::Result<()>>,
     },
     SlotRemove {
@@ -765,7 +767,13 @@ impl RocksdbWrite {
                         break;
                     }
                 }
-                WriteRequest::SlotAdd { slot, data, tx } => {
+                WriteRequest::SlotAdd {
+                    slot,
+                    data,
+                    _slot_arrived,
+                    fetched_at,
+                    tx,
+                } => {
                     buf.clear();
                     if let Some((block, storage_id, offset)) = data {
                         SlotBasicIndexValue {
@@ -789,6 +797,13 @@ impl RocksdbWrite {
                         SlotBasicIndex::key(slot),
                         &buf,
                     );
+                    if result.is_ok() {
+                        if let Some(_) = fetched_at {
+                            debug!(slot, "backfill slot fully indexed");
+                        } else {
+                            debug!(slot, "slot fully indexed");
+                        }
+                    }
                     if tx.send(result.map_err(Into::into)).is_err() {
                         break;
                     }
@@ -971,6 +986,8 @@ impl RocksdbWrite {
                 .send(WriteRequest::SlotAdd {
                     slot,
                     data: None,
+                    _slot_arrived: Instant::now(),
+                    fetched_at: None,
                     tx,
                 })
                 .context("failed to send WriteRequest::SlotAdd request")?;
@@ -1005,11 +1022,15 @@ impl RocksdbWrite {
 
         let block_time = block.block_time;
         let block_height = block.block_height;
+        let slot_arrived = block.slot_arrived;
+        let fetched_at = block.fetched_at;
         let (tx, rx) = oneshot::channel();
         self.req_tx
             .send(WriteRequest::SlotAdd {
                 slot,
                 data: Some((block, storage_id, offset)),
+                _slot_arrived: slot_arrived,
+                fetched_at,
                 tx,
             })
             .context("failed to send WriteRequest::SlotAdd request")?;
@@ -1063,6 +1084,8 @@ impl RocksdbWrite {
                 .send(WriteRequest::SlotAdd {
                     slot,
                     data: None,
+                    _slot_arrived: Instant::now(),
+                    fetched_at: None,
                     tx,
                 })
                 .context("failed to send WriteRequest::SlotAdd request")?;
@@ -1108,11 +1131,15 @@ impl RocksdbWrite {
 
         let block_time = block.block_time;
         let block_height = block.block_height;
+        let slot_arrived = block.slot_arrived;
+        let fetched_at = block.fetched_at;
         let (tx, rx) = oneshot::channel();
         self.req_tx
             .send(WriteRequest::SlotAdd {
                 slot,
                 data: Some((block, storage_id, offset)),
+                _slot_arrived: slot_arrived,
+                fetched_at,
                 tx,
             })
             .context("failed to send WriteRequest::SlotAdd request")?;

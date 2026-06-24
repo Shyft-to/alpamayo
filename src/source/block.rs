@@ -12,13 +12,14 @@ use {
             self, DecodeContext, WireType, encode_key, encode_varint, encoded_len_varint, key_len,
         },
     },
+    quanta::Instant,
     solana_clock::{Slot, UnixTimestamp},
     solana_pubkey::Pubkey,
     solana_signature::Signature,
     solana_storage_proto::convert::generated,
     solana_transaction::TransactionError,
     solana_transaction_status::{ConfirmedBlock, Reward, RewardType, Rewards},
-    std::{collections::hash_map::Entry as HashMapEntry, ops::Deref, sync::Arc},
+    std::{collections::hash_map::Entry as HashMapEntry, ops::Deref, sync::Arc, time::Duration},
 };
 
 #[derive(Debug, Clone)]
@@ -40,6 +41,10 @@ pub struct BlockWithBinary {
     pub transactions: HashMap<Signature, TransactionWithBinary>,
     pub sfa: HashMap<Pubkey, SignaturesForAddress>,
     pub fees: Arc<TransactionsFees>,
+    pub slot_arrived: Instant,
+    pub fetched_at: Option<Instant>,
+    pub file_write_elapsed: Option<Duration>,
+    pub index_write_elapsed: Option<Duration>,
 }
 
 impl BlockWithBinary {
@@ -47,6 +52,7 @@ impl BlockWithBinary {
         block: ConfirmedBlock,
         slot: Slot,
         index_vote: bool,
+        fetched_at: Option<Instant>,
     ) -> Self {
         Self::new(
             block.previous_blockhash,
@@ -63,6 +69,8 @@ impl BlockWithBinary {
             block.block_time,
             block.block_height,
             index_vote,
+            Instant::now(),
+            fetched_at,
         )
     }
 
@@ -77,6 +85,8 @@ impl BlockWithBinary {
         block_time: Option<UnixTimestamp>,
         block_height: Option<Slot>,
         index_vote: bool,
+        slot_arrived: Instant,
+        fetched_at: Option<Instant>,
     ) -> Self {
         if !index_vote {
             transactions.retain(|tx| !tx.is_vote);
@@ -126,6 +136,10 @@ impl BlockWithBinary {
             transactions,
             sfa,
             fees,
+            slot_arrived,
+            fetched_at,
+            file_write_elapsed: None,
+            index_write_elapsed: None,
         }
     }
 }

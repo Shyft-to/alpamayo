@@ -3,6 +3,7 @@ use {
     base64::{Engine, prelude::BASE64_STANDARD},
     metrics::histogram,
     prost::Message as _,
+    quanta::Instant,
     reqwest::{Client, StatusCode},
     richat_metrics::duration_to_seconds,
     solana_clock::Slot,
@@ -34,7 +35,7 @@ use {
         UiTransactionReturnData, UiTransactionStatusMeta, UiTransactionTokenBalance,
         VersionedTransactionWithStatusMeta, option_serializer::OptionSerializer,
     },
-    std::{fmt, time::Instant},
+    std::fmt,
     thiserror::Error,
     tokio::sync::Semaphore,
     tracing::{debug, info, warn},
@@ -153,22 +154,22 @@ impl HttpSource {
         slot: Slot,
         httpget: bool,
     ) -> Result<BlockWithBinary, GetBlockError> {
-        let ts = Instant::now();
+        let fetched_at = Instant::now();
         let result = if httpget
             && self.httpurl.is_some()
-            && let Some(block) = self.get_block_http(slot).await
+            && let Some(block) = self.get_block_http(slot, fetched_at).await
         {
             Ok(block)
         } else {
-            self.get_block_rpc(slot).await
+            self.get_block_rpc(slot, fetched_at).await
         };
-        let elapsed = ts.elapsed();
+        let elapsed = fetched_at.elapsed();
         histogram!(SOURCE_HTTP_BLOCK).record(duration_to_seconds(elapsed));
         debug!(slot, ?elapsed, "block fetch completed");
         result
     }
 
-    async fn get_block_http(&self, slot: Slot) -> Option<BlockWithBinary> {
+    async fn get_block_http(&self, slot: Slot, fetched_at: Instant) -> Option<BlockWithBinary> {
         let (url, client) = self.httpurl.as_ref()?;
 
         let url = url.join(&format!("block/{slot}")).ok()?;
@@ -190,10 +191,15 @@ impl HttpSource {
             block,
             slot,
             self.index_vote,
+            Some(fetched_at),
         ))
     }
 
-    async fn get_block_rpc(&self, slot: Slot) -> Result<BlockWithBinary, GetBlockError> {
+    async fn get_block_rpc(
+        &self,
+        slot: Slot,
+        fetched_at: Instant,
+    ) -> Result<BlockWithBinary, GetBlockError> {
         let config = RpcBlockConfig {
             encoding: Some(UiTransactionEncoding::Base64),
             transaction_details: Some(TransactionDetails::Full),
@@ -247,6 +253,7 @@ impl HttpSource {
             block,
             slot,
             self.index_vote,
+            Some(fetched_at),
         ))
     }
 

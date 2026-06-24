@@ -213,6 +213,7 @@ impl RpcClientJsonrpcInner {
         method: &'static str,
         params: serde_json::Value,
         deadline: Instant,
+        reason: &'static str,
     ) -> Result<T, Cow<'static, str>> {
         let body = json!({
             "jsonrpc": "2.0",
@@ -223,7 +224,7 @@ impl RpcClientJsonrpcInner {
         .to_string();
 
         let bytes = self
-            .call_with_timeout(x_subscription_id, method, body, deadline)
+            .call_with_timeout(x_subscription_id, method, body, deadline, reason)
             .await?;
 
         let result: Response<T> = serde_json::from_slice(&bytes)
@@ -243,6 +244,7 @@ impl RpcClientJsonrpcInner {
         method: &'static str,
         body: String,
         deadline: Instant,
+        reason: &'static str,
     ) -> RpcClientJsonrpcResultRaw {
         let ts = Instant::now();
         let result = timeout_at(deadline.into(), self.call2(&x_subscription_id, body)).await;
@@ -252,6 +254,7 @@ impl RpcClientJsonrpcInner {
             "upstream" => Arc::clone(&self.name),
             "method" => method,
             "timeout" => if result.is_err() { "true" } else { "false" },
+            "reason" => reason,
         )
         .increment(1);
         let Ok(result) = result else {
@@ -263,6 +266,7 @@ impl RpcClientJsonrpcInner {
             "x_subscription_id" => Arc::clone(&x_subscription_id),
             "upstream" => Arc::clone(&self.name),
             "method" => method,
+            "reason" => reason,
         )
         .record(duration_to_seconds(ts.elapsed()));
         if let Ok(value) = &result {
@@ -350,6 +354,7 @@ impl RpcClientJsonrpc {
         commitment: CommitmentConfig,
         encoding: UiTransactionEncoding,
         encoding_options: BlockEncodingOptions,
+        reason: &'static str,
     ) -> RpcClientJsonrpcResult {
         self.inner
             .call_with_timeout(
@@ -370,6 +375,7 @@ impl RpcClientJsonrpc {
                 })
                 .to_string(),
                 deadline,
+                reason,
             )
             .await
             .map(Into::into)
@@ -383,6 +389,7 @@ impl RpcClientJsonrpc {
         deadline: Instant,
         id: &Id<'static>,
         slot: Slot,
+        reason: &'static str,
     ) -> anyhow::Result<Result<Option<UiConfirmedBlock>, Vec<u8>>> {
         let bytes = self.inner
             .call_with_timeout(
@@ -396,6 +403,7 @@ impl RpcClientJsonrpc {
                 })
                 .to_string(),
                 deadline,
+                reason,
             )
             .await
             .map_err(|error| anyhow::anyhow!(error))?;
@@ -410,6 +418,7 @@ impl RpcClientJsonrpc {
         Ok(Ok(value.into_owned()))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn get_blocks(
         &self,
         x_subscription_id: Arc<str>,
@@ -418,6 +427,7 @@ impl RpcClientJsonrpc {
         start_slot: Slot,
         until: RpcRequestBlocksUntil,
         commitment: CommitmentConfig,
+        reason: &'static str,
     ) -> RpcClientJsonrpcResult {
         let method = match until {
             RpcRequestBlocksUntil::EndSlot(_) => "getBlocks",
@@ -438,6 +448,7 @@ impl RpcClientJsonrpc {
             })
             .to_string(),
             deadline,
+            reason,
         )
         .await
         .map(Into::into)
@@ -451,6 +462,7 @@ impl RpcClientJsonrpc {
         id: &Id<'static>,
         start_slot: Slot,
         limit: usize,
+        reason: &'static str,
     ) -> anyhow::Result<Result<Vec<Slot>, Vec<u8>>> {
         let bytes = self
             .inner
@@ -465,6 +477,7 @@ impl RpcClientJsonrpc {
                 })
                 .to_string(),
                 deadline,
+                reason,
             )
             .await
             .map_err(|error| anyhow::anyhow!(error))?;
@@ -485,6 +498,7 @@ impl RpcClientJsonrpc {
         deadline: Instant,
         id: &Id<'static>,
         slot: Slot,
+        reason: &'static str,
     ) -> RpcClientJsonrpcResult {
         self.inner
             .call_with_timeout(
@@ -498,6 +512,7 @@ impl RpcClientJsonrpc {
                 })
                 .to_string(),
                 deadline,
+                reason,
             )
             .await
             .map(Into::into)
@@ -509,6 +524,7 @@ impl RpcClientJsonrpc {
         x_subscription_id: Arc<str>,
         deadline: Instant,
         id: Id<'static>,
+        reason: &'static str,
     ) -> RpcClientJsonrpcResult {
         let inner = Arc::clone(&self.inner);
         let payload = self
@@ -521,6 +537,7 @@ impl RpcClientJsonrpc {
                             "getClusterNodes",
                             json!([]),
                             deadline,
+                            reason,
                         )
                         .await
                 }
@@ -537,6 +554,7 @@ impl RpcClientJsonrpc {
         x_subscription_id: Arc<str>,
         deadline: Instant,
         id: &Id<'static>,
+        reason: &'static str,
     ) -> RpcClientJsonrpcResult {
         self.inner
             .call_with_timeout(
@@ -550,6 +568,7 @@ impl RpcClientJsonrpc {
                 })
                 .to_string(),
                 deadline,
+                reason,
             )
             .await
             .map(Into::into)
@@ -566,6 +585,7 @@ impl RpcClientJsonrpc {
         slot: Slot,
         is_processed: bool,
         identity: Option<String>,
+        reason: &'static str,
     ) -> RpcClientJsonrpcResult {
         if is_processed {
             return self
@@ -584,6 +604,7 @@ impl RpcClientJsonrpc {
                     })
                     .to_string(),
                     deadline,
+                    reason,
                 )
                 .await
                 .map(Into::into)
@@ -615,6 +636,7 @@ impl RpcClientJsonrpc {
                                 }
                             ]),
                             deadline,
+                            reason,
                         )
                         .await
                         .map(Arc::new)
@@ -657,6 +679,7 @@ impl RpcClientJsonrpc {
         until: Option<Signature>,
         limit: usize,
         commitment: CommitmentConfig,
+        reason: &'static str,
     ) -> RpcClientJsonrpcResult {
         self.inner
             .call_with_timeout(
@@ -676,6 +699,7 @@ impl RpcClientJsonrpc {
                 })
                 .to_string(),
                 deadline,
+                reason,
             )
             .await
             .map(Into::into)
@@ -688,6 +712,7 @@ impl RpcClientJsonrpc {
         deadline: Instant,
         id: &Id<'static>,
         signatures: Vec<&Signature>,
+        reason: &'static str,
     ) -> RpcClientJsonrpcResult {
         let signatures = signatures.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         self.inner
@@ -704,6 +729,7 @@ impl RpcClientJsonrpc {
                 })
                 .to_string(),
                 deadline,
+                reason,
             )
             .await
             .map(Into::into)
@@ -720,6 +746,7 @@ impl RpcClientJsonrpc {
         commitment: CommitmentConfig,
         encoding: UiTransactionEncoding,
         max_supported_transaction_version: Option<u8>,
+        reason: &'static str,
     ) -> RpcClientJsonrpcResult {
         self.inner
             .call_with_timeout(
@@ -737,6 +764,7 @@ impl RpcClientJsonrpc {
                 })
                 .to_string(),
                 deadline,
+                reason,
             )
             .await
             .map(Into::into)
