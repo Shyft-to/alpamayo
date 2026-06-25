@@ -81,7 +81,10 @@ impl TransactionFees {
     pub fn is_vote(tx: &VersionedTransactionWithStatusMeta) -> bool {
         let account_keys = tx.account_keys();
         for instruction in tx.transaction.message.instructions() {
-            if parse_vote(instruction, &account_keys).is_ok() {
+            let is_vote_program = account_keys
+                .get(instruction.program_id_index as usize)
+                .is_some_and(|program_id| solana_vote_interface::program::check_id(program_id));
+            if is_vote_program && parse_vote(instruction, &account_keys).is_ok() {
                 return true;
             }
         }

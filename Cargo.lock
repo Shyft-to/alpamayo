@@ -190,6 +190,7 @@ dependencies = [
  "solana-transaction-context",
  "solana-transaction-status",
  "solana-version",
+ "solana-vote-interface",
  "thiserror 2.0.18",
  "tikv-jemallocator",
  "tokio",
