@@ -1,5 +1,15 @@
-use rocksdb::{DB, Options};
-use std::env;
+use {
+    alpamayo::config::Config,
+    clap::Parser,
+    rocksdb::{DB, Options},
+};
+
+#[derive(Debug, Parser)]
+#[clap(author, version, about = "Alpamayo: RocksDB storage inspector")]
+struct Args {
+    #[clap(short, long, default_value_t = String::from("config.yml"))]
+    pub config: String,
+}
 
 const CF_NAMES: &[&str] = &[
     "slot_basic_index",
@@ -20,9 +30,21 @@ fn human(bytes: u64) -> String {
     format!("{size:.2} {}", units[unit])
 }
 
+fn parse_agg_prop(props: &str, key: &str) -> u64 {
+    props
+        .split(';')
+        .find_map(|s| {
+            s.trim()
+                .strip_prefix(key)
+                .and_then(|v| v.trim_start_matches('=').trim().parse().ok())
+        })
+        .unwrap_or(0)
+}
+
 fn main() -> anyhow::Result<()> {
-    let args: Vec<String> = env::args().collect();
-    let primary_path = args.get(1).expect("arg1: primary rocksdb path");
+    let args = Args::parse();
+    let config = Config::load_from_file(&args.config)?;
+    let primary_path = &config.storage.rocksdb.path;
 
     let mut opts = Options::default();
     opts.create_if_missing(false);
@@ -32,10 +54,14 @@ fn main() -> anyhow::Result<()> {
 
     let db = DB::open_cf_for_read_only(&opts, primary_path, CF_NAMES, false)?;
 
-    let mut total: u64 = 0;
+    let mut total_sst: u64 = 0;
+    let mut total_live: u64 = 0;
+    let mut total_tombstones: u64 = 0;
+    let mut total_pending: u64 = 0;
+
     println!(
-        "{:<20} {:>14} {:>16} {:>16}",
-        "CF", "num_keys", "sst_size", "live_data"
+        "{:<20} {:>14} {:>14} {:>16} {:>16} {:>16} {:>16}",
+        "CF", "num_keys", "tombstones", "sst_size", "live_data", "waste", "pending_compact"
     );
     for name in CF_NAMES {
         let cf = db.cf_handle(name).expect("cf must exist");
@@ -49,18 +75,48 @@ fn main() -> anyhow::Result<()> {
         let live_size: u64 = db
             .property_int_value_cf(cf, "rocksdb.estimate-live-data-size")?
             .unwrap_or(0);
+        let pending_compact: u64 = db
+            .property_int_value_cf(cf, "rocksdb.estimate-pending-compaction-bytes")?
+            .unwrap_or(0);
 
-        total += sst_size;
+        let props = db
+            .property_value_cf(cf, "rocksdb.aggregated-table-properties")?
+            .unwrap_or_default();
+        let tombstones = parse_agg_prop(&props, "# deletions");
+
+        let waste = sst_size.saturating_sub(live_size);
+
+        total_sst += sst_size;
+        total_live += live_size;
+        total_tombstones += tombstones;
+        total_pending += pending_compact;
+
         println!(
-            "{:<20} {:>14} {:>16} {:>16}",
+            "{:<20} {:>14} {:>14} {:>16} {:>16} {:>16} {:>16}",
             name,
             num_keys,
+            tombstones,
             human(sst_size),
-            human(live_size)
+            human(live_size),
+            human(waste),
+            human(pending_compact),
         );
     }
+
+    let total_waste = total_sst.saturating_sub(total_live);
+    let space_amp = if total_live > 0 {
+        total_sst as f64 / total_live as f64
+    } else {
+        0.0
+    };
+
     println!("---");
-    println!("total sst size: {}", human(total));
+    println!("total sst size:       {}", human(total_sst));
+    println!("total live data:      {}", human(total_live));
+    println!("total waste:          {}", human(total_waste));
+    println!("total tombstones:     {total_tombstones}");
+    println!("total pending compact:{}", human(total_pending));
+    println!("space amplification:  {space_amp:.2}x");
 
     Ok(())
 }

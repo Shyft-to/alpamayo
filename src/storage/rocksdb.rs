@@ -567,6 +567,7 @@ impl Rocksdb {
     #[allow(clippy::type_complexity)]
     pub fn open(
         config: ConfigStorageRocksdb,
+        blocks_max: usize,
         sync_tx: broadcast::Sender<ReadWriteSyncMessage>,
     ) -> anyhow::Result<(
         RocksdbWrite,
@@ -575,9 +576,14 @@ impl Rocksdb {
         Vec<(String, Option<JoinHandle<anyhow::Result<()>>>)>,
     )> {
         let db_options = Self::get_db_options();
+        // Solana target slot time is ~400ms. Multiply by 1.25 so periodic
+        // compaction fires after the slot window has fully turned over and
+        // tombstones from pruned slots exist — not while entries are still live.
+        let periodic_compaction_secs = blocks_max as u64 * 400 / 1000 * 5 / 4;
         let cf_descriptors = Self::cf_descriptors(
             config.index_slot_compression.into(),
             config.index_sfa_compression.into(),
+            periodic_compaction_secs,
         );
 
         let db = Arc::new(
@@ -638,7 +644,7 @@ impl Rocksdb {
         options
     }
 
-    fn get_cf_options(compression: DBCompressionType) -> Options {
+    fn get_cf_options(compression: DBCompressionType, periodic_compaction_secs: u64) -> Options {
         let mut options = Options::default();
 
         const MAX_WRITE_BUFFER_SIZE: u64 = 256 * 1024 * 1024;
@@ -654,24 +660,48 @@ impl Rocksdb {
 
         options.set_compression_type(compression);
 
+        // At steady state the write rate drops to ~1 block/400ms, so L0 rarely
+        // accumulates enough files to trigger automatic compaction. Without this,
+        // delete tombstones from slot pruning (sfa_index / tx_index) accumulate
+        // indefinitely. periodic_compaction_secs is derived from blocks_max so
+        // compaction fires after the slot window turns over and tombstones exist,
+        // not while entries are still live.
+        options.set_periodic_compaction_seconds(periodic_compaction_secs);
+
         options
     }
 
     fn cf_descriptors(
         index_slot_compression: DBCompressionType,
         index_sfa_compression: DBCompressionType,
+        periodic_compaction_secs: u64,
     ) -> Vec<ColumnFamilyDescriptor> {
         vec![
-            Self::cf_descriptor::<SlotBasicIndex>(DBCompressionType::None),
-            Self::cf_descriptor::<SlotExtraIndex>(index_slot_compression),
-            Self::cf_descriptor::<TransactionIndex>(DBCompressionType::None),
-            Self::cf_descriptor::<SfaIndex>(index_sfa_compression),
-            Self::cf_descriptor::<InflationRewardIndex>(DBCompressionType::None),
+            Self::cf_descriptor::<SlotBasicIndex>(
+                DBCompressionType::None,
+                periodic_compaction_secs,
+            ),
+            Self::cf_descriptor::<SlotExtraIndex>(index_slot_compression, periodic_compaction_secs),
+            Self::cf_descriptor::<TransactionIndex>(
+                DBCompressionType::None,
+                periodic_compaction_secs,
+            ),
+            Self::cf_descriptor::<SfaIndex>(index_sfa_compression, periodic_compaction_secs),
+            Self::cf_descriptor::<InflationRewardIndex>(
+                DBCompressionType::None,
+                periodic_compaction_secs,
+            ),
         ]
     }
 
-    fn cf_descriptor<C: ColumnName>(compression: DBCompressionType) -> ColumnFamilyDescriptor {
-        ColumnFamilyDescriptor::new(C::NAME, Self::get_cf_options(compression))
+    fn cf_descriptor<C: ColumnName>(
+        compression: DBCompressionType,
+        periodic_compaction_secs: u64,
+    ) -> ColumnFamilyDescriptor {
+        ColumnFamilyDescriptor::new(
+            C::NAME,
+            Self::get_cf_options(compression, periodic_compaction_secs),
+        )
     }
 
     fn cf_handle<C: ColumnName>(db: &DB) -> &ColumnFamily {
