@@ -2,6 +2,7 @@ use {
     alpamayo::config::Config,
     clap::Parser,
     rocksdb::{DB, Options},
+    std::collections::HashMap,
 };
 
 #[derive(Debug, Parser)]
@@ -30,17 +31,6 @@ fn human(bytes: u64) -> String {
     format!("{size:.2} {}", units[unit])
 }
 
-fn parse_agg_prop(props: &str, key: &str) -> u64 {
-    props
-        .split(';')
-        .find_map(|s| {
-            s.trim()
-                .strip_prefix(key)
-                .and_then(|v| v.trim_start_matches('=').trim().parse().ok())
-        })
-        .unwrap_or(0)
-}
-
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let config = Config::load_from_file(&args.config)?;
@@ -49,10 +39,16 @@ fn main() -> anyhow::Result<()> {
     let mut opts = Options::default();
     opts.create_if_missing(false);
     opts.create_missing_column_families(false);
-    // avoid needing a huge ulimit -n just to read CF properties
     opts.set_max_open_files(512);
 
     let db = DB::open_cf_for_read_only(&opts, primary_path, CF_NAMES, false)?;
+
+    let mut cf_entries: HashMap<String, (u64, u64)> = HashMap::new();
+    for f in db.live_files()? {
+        let (entries, deletions) = cf_entries.entry(f.column_family_name).or_default();
+        *entries += f.num_entries;
+        *deletions += f.num_deletions;
+    }
 
     let mut total_sst: u64 = 0;
     let mut total_live: u64 = 0;
@@ -61,14 +57,11 @@ fn main() -> anyhow::Result<()> {
 
     println!(
         "{:<20} {:>14} {:>14} {:>16} {:>16} {:>16} {:>16}",
-        "CF", "num_keys", "tombstones", "sst_size", "live_data", "waste", "pending_compact"
+        "CF", "num_entries", "tombstones", "sst_size", "live_data", "waste", "pending_compact"
     );
     for name in CF_NAMES {
         let cf = db.cf_handle(name).expect("cf must exist");
 
-        let num_keys: u64 = db
-            .property_int_value_cf(cf, "rocksdb.estimate-num-keys")?
-            .unwrap_or(0);
         let sst_size: u64 = db
             .property_int_value_cf(cf, "rocksdb.total-sst-files-size")?
             .unwrap_or(0);
@@ -79,11 +72,7 @@ fn main() -> anyhow::Result<()> {
             .property_int_value_cf(cf, "rocksdb.estimate-pending-compaction-bytes")?
             .unwrap_or(0);
 
-        let props = db
-            .property_value_cf(cf, "rocksdb.aggregated-table-properties")?
-            .unwrap_or_default();
-        let tombstones = parse_agg_prop(&props, "# deletions");
-
+        let (num_entries, tombstones) = cf_entries.get(*name).copied().unwrap_or_default();
         let waste = sst_size.saturating_sub(live_size);
 
         total_sst += sst_size;
@@ -94,7 +83,7 @@ fn main() -> anyhow::Result<()> {
         println!(
             "{:<20} {:>14} {:>14} {:>16} {:>16} {:>16} {:>16}",
             name,
-            num_keys,
+            num_entries,
             tombstones,
             human(sst_size),
             human(live_size),
