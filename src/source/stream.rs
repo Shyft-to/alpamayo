@@ -68,9 +68,10 @@ pub enum StreamSourceSlotStatus {
 
 #[derive(Debug)]
 pub enum StreamSourceMessage {
-    Start {
-        from_slot_resumed: bool,
-    },
+    Start,
+    /// from_slot resume has been given up on: catch up via rpc before the
+    /// next (plain, live) connect attempt is made
+    CatchupRequired,
     Block {
         slot: Slot,
         block: BlockWithBinary,

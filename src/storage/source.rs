@@ -151,21 +151,37 @@ async fn start_stream(
     let mut from_slot_attempts = 0u8;
 
     stream_start.notified().await;
-    loop {
+    'outer: loop {
         let confirmed_slot = stored_slots.confirmed_load();
-        let mut from_slot = (confirmed_slot != Slot::MIN
-            && from_slot_attempts < from_slot_max_attempts)
-            .then_some(confirmed_slot + 1);
+        let from_slot_exhausted =
+            confirmed_slot != Slot::MIN && from_slot_attempts >= from_slot_max_attempts;
+        let from_slot =
+            (confirmed_slot != Slot::MIN && !from_slot_exhausted).then_some(confirmed_slot + 1);
+
+        if from_slot_exhausted {
+            // from_slot resume gave up: let the write side catch up via rpc
+            // first, then connect live, same as before from_slot resume
+            // existed at all
+            if stream_tx
+                .send(StreamSourceMessage::CatchupRequired)
+                .await
+                .is_err()
+            {
+                error!("failed to send a message to the stream");
+                return Ok(());
+            }
+            stream_start.notified().await;
+            from_slot_attempts = 0;
+        }
 
         let mut stream = loop {
             match StreamSource::new(config.clone(), index_vote, from_slot).await {
                 Ok(stream) => break stream,
                 Err(error) => {
+                    let mut just_exhausted = false;
                     if from_slot.is_some() {
                         from_slot_attempts += 1;
-                        if from_slot_attempts >= from_slot_max_attempts {
-                            from_slot = None;
-                        }
+                        just_exhausted = from_slot_attempts >= from_slot_max_attempts;
                     }
                     if let Some(sleep_duration) = backoff_duration {
                         error!(?error, "failed to connect to gRPC stream");
@@ -174,15 +190,16 @@ async fn start_stream(
                     } else {
                         return Err(error.into());
                     }
+                    if just_exhausted {
+                        // catch up via rpc before retrying, instead of
+                        // silently falling back to a live connect here
+                        continue 'outer;
+                    }
                 }
             }
         };
         let from_slot_resumed = from_slot.is_some();
-        if stream_tx
-            .send(StreamSourceMessage::Start { from_slot_resumed })
-            .await
-            .is_err()
-        {
+        if stream_tx.send(StreamSourceMessage::Start).await.is_err() {
             error!("failed to send a message to the stream");
             return Ok(());
         }
