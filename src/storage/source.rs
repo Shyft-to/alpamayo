@@ -144,12 +144,18 @@ async fn start_stream(
         .reconnect
         .map(|c| c.from_slot_max_attempts)
         .unwrap_or(2);
+    // persists across reconnects: a from_slot that keeps failing (either to
+    // connect, or by erroring out before ever delivering a message, e.g. the
+    // requested slot fell out of the node's replay buffer) must eventually
+    // be given up on, not retried forever
+    let mut from_slot_attempts = 0u8;
 
     stream_start.notified().await;
     loop {
         let confirmed_slot = stored_slots.confirmed_load();
-        let mut from_slot = (confirmed_slot != Slot::MIN).then_some(confirmed_slot + 1);
-        let mut from_slot_attempts = 0u8;
+        let mut from_slot = (confirmed_slot != Slot::MIN
+            && from_slot_attempts < from_slot_max_attempts)
+            .then_some(confirmed_slot + 1);
 
         let mut stream = loop {
             match StreamSource::new(config.clone(), index_vote, from_slot).await {
@@ -181,9 +187,12 @@ async fn start_stream(
             return Ok(());
         }
 
+        let mut received_message = false;
         loop {
             match stream.next().await {
                 Some(Ok(message)) => {
+                    received_message = true;
+                    from_slot_attempts = 0;
                     if stream_tx.send(message).await.is_err() {
                         error!("failed to send a message to the stream");
                         return Ok(());
@@ -191,6 +200,9 @@ async fn start_stream(
                 }
                 Some(Err(error)) => {
                     error!(?error, "gRPC stream error");
+                    if from_slot_resumed && !received_message {
+                        from_slot_attempts += 1;
+                    }
                     break;
                 }
                 None => {
@@ -201,6 +213,10 @@ async fn start_stream(
         }
 
         if let Some(config) = config.reconnect {
+            // throttle even when the stream connected fine and only errored
+            // afterwards (e.g. from_slot out of range) - otherwise this spins
+            // as fast as the server can reject us
+            sleep(config.backoff_init).await;
             backoff_duration = Some(config.backoff_init);
         } else {
             return Ok(());
