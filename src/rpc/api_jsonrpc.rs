@@ -582,10 +582,10 @@ impl RpcRequestHandler for RpcRequestBlock {
 
 impl RpcRequestBlock {
     async fn fetch_upstream(self, deadline: Instant, reason: &'static str) -> RpcRequestResult {
-        debug!(self.slot, reason = ?reason, "getBlock slot going upstream");
         if self.upstream_disabled {
             return Ok(jsonrpc_response_success(self.id, None::<()>));
         }
+        debug!(self.slot, reason = ?reason, "getBlock slot going upstream");
 
         if let Some(upstream) = self.state.get_upstream(ConfigRpcCallJson::GetBlock) {
             upstream
@@ -3287,10 +3287,10 @@ impl RpcRequestHandler for RpcRequestTransaction {
 
 impl RpcRequestTransaction {
     async fn fetch_upstream(self, deadline: Instant, reason: &'static str) -> RpcRequestResult {
-        debug!(%self.signature, reason = ?reason, "getTransaction signature going upstream");
         if self.upstream_disabled {
             return Ok(jsonrpc_response_success(self.id, None::<()>));
         }
+        debug!(%self.signature, reason = ?reason, "getTransaction signature going upstream");
 
         if let Some(upstream) = self.state.get_upstream(ConfigRpcCallJson::GetTransaction) {
             upstream
