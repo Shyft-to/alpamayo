@@ -93,6 +93,13 @@ pub fn start(
                 let (mut storage_files, storage_files_read_sync_init) =
                     StorageFilesWrite::open(files, &blocks).await?;
 
+                // seed the confirmed slot from disk so the stream can attempt
+                // a from_slot resume on its very first connect, not just on
+                // later reconnects
+                if let Some(slot) = blocks.get_front_slot() {
+                    stored_slots.confirmed_store(slot);
+                }
+
                 // load recent blocks
                 let ts = Instant::now();
                 let recent_blocks =
@@ -253,93 +260,8 @@ async fn start2(
     let mut queued_slots_back = HashMap::<Slot, Option<Arc<BlockWithBinary>>>::default();
     let mut queued_slots_front = HashMap::<Slot, Option<Arc<BlockWithBinary>>>::default();
 
-    // fill the gap between stored and new
-    let mut next_confirmed_slot = load_confirmed_slot(&http, &stored_slots, &sync_tx).await?;
-    if let Some(slot) = blocks.get_front_slot() {
-        let mut next_confirmed_slot_last_update = Instant::now();
-        let mut next_request_slot = slot + 1;
-        let mut next_database_slot = slot + 1;
-        info!(
-            next_database_slot,
-            slot_node = next_confirmed_slot,
-            diff = next_confirmed_slot - next_database_slot,
-            "initiate node catch-up process"
-        );
-        anyhow::ensure!(
-            next_database_slot <= next_confirmed_slot,
-            "node is outdated"
-        );
-
-        let mut last_confirmed_slot = next_confirmed_slot;
-        let mut last_confirmed_slot_update_ts = Instant::now();
-        loop {
-            // update confirmed slot every 2s
-            if next_confirmed_slot_last_update.elapsed() > Duration::from_secs(2) {
-                next_confirmed_slot = load_confirmed_slot(&http, &stored_slots, &sync_tx).await?;
-                next_confirmed_slot_last_update = Instant::now();
-                let sync_rate = if last_confirmed_slot_update_ts.elapsed().as_secs() > 0 {
-                    next_database_slot.saturating_sub(last_confirmed_slot) as f64
-                        / last_confirmed_slot_update_ts.elapsed().as_secs() as f64
-                } else {
-                    0.0
-                };
-                info!(
-                    slot_db = next_database_slot,
-                    slot_node = next_confirmed_slot,
-                    diff = next_confirmed_slot - next_database_slot,
-                    sync_rate,
-                    "trying to catch-up the node"
-                );
-                last_confirmed_slot = next_database_slot;
-                last_confirmed_slot_update_ts = Instant::now();
-            }
-
-            // break if we are close enough
-            if next_database_slot + 2 >= next_confirmed_slot {
-                next_confirmed_slot = next_database_slot;
-                break;
-            }
-
-            // get blocks
-            while next_request_slot <= next_confirmed_slot && !http_blocks.is_full() {
-                http_blocks.fetch(next_request_slot, true);
-                next_request_slot += 1;
-            }
-
-            // push block into the queue
-            match http_blocks.next().await {
-                Some(Ok((slot, block))) => {
-                    if slot >= next_database_slot {
-                        queued_slots_front.insert(slot, block.map(Arc::new));
-                    }
-                }
-                Some(Err(error)) => return Err(error),
-                None => return Ok(()),
-            }
-
-            while let Some(block) = queued_slots_front.remove(&next_database_slot) {
-                let _ = sync_tx.send(ReadWriteSyncMessage::BlockConfirmed {
-                    slot: next_database_slot,
-                    block: block.clone(),
-                });
-
-                let ts = Instant::now();
-                db_write
-                    .push_block_front(next_database_slot, block, storage_files, &mut blocks)
-                    .await?;
-                let elapsed = ts.elapsed();
-                metric_storage_block_sync.record(duration_to_seconds(elapsed));
-                debug!(
-                    slot = next_database_slot,
-                    ?elapsed,
-                    "push new block from backfilling"
-                );
-
-                next_database_slot += 1;
-            }
-        }
-    }
     stream_start.notify_one();
+    let mut next_confirmed_slot = load_confirmed_slot(&http, &stored_slots, &sync_tx).await?;
 
     let mut storage_memory = StorageMemory::default();
     let mut next_back_slot = None;
@@ -380,8 +302,130 @@ async fn start2(
                     match message {
                         StreamSourceMessage::Start => {
                             storage_memory = StorageMemory::default();
+
+                            if let Some(slot) = blocks.get_front_slot() {
+                                next_confirmed_slot = slot + 1;
+                            }
+                        }
+                        StreamSourceMessage::CatchupRequired => {
+                            // from_slot resume gave up on the source side:
+                            // catch up the backlog via rpc before it attempts
+                            // a plain (live) connect
+                            if let Some(slot) = blocks.get_front_slot() {
+                                let mut next_confirmed_slot_last_update = Instant::now();
+                                next_confirmed_slot =
+                                    load_confirmed_slot(&http, &stored_slots, &sync_tx).await?;
+                                let mut next_request_slot = slot + 1;
+                                let mut next_database_slot = slot + 1;
+                                info!(
+                                    next_database_slot,
+                                    slot_node = next_confirmed_slot,
+                                    diff = next_confirmed_slot - next_database_slot,
+                                    "initiate node catch-up process"
+                                );
+                                anyhow::ensure!(
+                                    next_database_slot <= next_confirmed_slot,
+                                    "node is outdated"
+                                );
+
+                                let mut last_confirmed_slot = next_confirmed_slot;
+                                let mut last_confirmed_slot_update_ts = Instant::now();
+                                loop {
+                                    // update confirmed slot every 2s
+                                    if next_confirmed_slot_last_update.elapsed()
+                                        > Duration::from_secs(2)
+                                    {
+                                        next_confirmed_slot =
+                                            load_confirmed_slot(&http, &stored_slots, &sync_tx)
+                                                .await?;
+                                        next_confirmed_slot_last_update = Instant::now();
+                                        let sync_rate = if last_confirmed_slot_update_ts
+                                            .elapsed()
+                                            .as_secs()
+                                            > 0
+                                        {
+                                            next_database_slot
+                                                .saturating_sub(last_confirmed_slot)
+                                                as f64
+                                                / last_confirmed_slot_update_ts.elapsed().as_secs()
+                                                    as f64
+                                        } else {
+                                            0.0
+                                        };
+                                        info!(
+                                            slot_db = next_database_slot,
+                                            slot_node = next_confirmed_slot,
+                                            diff = next_confirmed_slot - next_database_slot,
+                                            sync_rate,
+                                            "trying to catch-up the node"
+                                        );
+                                        last_confirmed_slot = next_database_slot;
+                                        last_confirmed_slot_update_ts = Instant::now();
+                                    }
+
+                                    // break if we are close enough
+                                    if next_database_slot + 2 >= next_confirmed_slot {
+                                        next_confirmed_slot = next_database_slot;
+                                        break;
+                                    }
+
+                                    // get blocks
+                                    while next_request_slot <= next_confirmed_slot
+                                        && !http_blocks.is_full()
+                                    {
+                                        http_blocks.fetch(next_request_slot, true);
+                                        next_request_slot += 1;
+                                    }
+
+                                    // push block into the queue
+                                    match http_blocks.next().await {
+                                        Some(Ok((slot, block))) => {
+                                            if slot >= next_database_slot {
+                                                queued_slots_front
+                                                    .insert(slot, block.map(Arc::new));
+                                            }
+                                        }
+                                        Some(Err(error)) => return Err(error),
+                                        None => return Ok(()),
+                                    }
+
+                                    while let Some(block) =
+                                        queued_slots_front.remove(&next_database_slot)
+                                    {
+                                        let _ =
+                                            sync_tx.send(ReadWriteSyncMessage::BlockConfirmed {
+                                                slot: next_database_slot,
+                                                block: block.clone(),
+                                            });
+
+                                        let ts = Instant::now();
+                                        db_write
+                                            .push_block_front(
+                                                next_database_slot,
+                                                block,
+                                                storage_files,
+                                                &mut blocks,
+                                            )
+                                            .await?;
+                                        let elapsed = ts.elapsed();
+                                        metric_storage_block_sync
+                                            .record(duration_to_seconds(elapsed));
+                                        debug!(
+                                            slot = next_database_slot,
+                                            ?elapsed,
+                                            "push new block from backfilling"
+                                        );
+
+                                        next_database_slot += 1;
+                                    }
+                                }
+                            }
+
+                            // let the source connect live now that we've caught up
+                            stream_start.notify_one();
                         }
                         StreamSourceMessage::Block { slot, block } => {
+                            debug!(slot, "slot fully assembled from grpc");
                             let block = Arc::new(block);
                             storage_memory.add_processed(slot, Arc::clone(&block));
                             let _ = sync_tx.send(ReadWriteSyncMessage::BlockNew { slot, block });

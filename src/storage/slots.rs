@@ -92,7 +92,7 @@ impl StoredSlots {
         self.confirmed.load(Ordering::SeqCst)
     }
 
-    fn confirmed_store(&self, slot: Slot) {
+    pub(crate) fn confirmed_store(&self, slot: Slot) {
         self.confirmed.store(slot, Ordering::SeqCst);
         self.metrics.confirmed.set(slot as f64);
     }
