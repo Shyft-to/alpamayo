@@ -1,5 +1,16 @@
-use rocksdb::{DB, Options};
-use std::env;
+use {
+    alpamayo::config::Config,
+    clap::Parser,
+    rocksdb::{DB, Options},
+    std::collections::HashMap,
+};
+
+#[derive(Debug, Parser)]
+#[clap(author, version, about = "Alpamayo: RocksDB storage inspector")]
+struct Args {
+    #[clap(short, long, default_value_t = String::from("config.yml"))]
+    pub config: String,
+}
 
 const CF_NAMES: &[&str] = &[
     "slot_basic_index",
@@ -21,46 +32,80 @@ fn human(bytes: u64) -> String {
 }
 
 fn main() -> anyhow::Result<()> {
-    let args: Vec<String> = env::args().collect();
-    let primary_path = args.get(1).expect("arg1: primary rocksdb path");
+    let args = Args::parse();
+    let config = Config::load_from_file(&args.config)?;
+    let primary_path = &config.storage.rocksdb.path;
 
     let mut opts = Options::default();
     opts.create_if_missing(false);
     opts.create_missing_column_families(false);
-    // avoid needing a huge ulimit -n just to read CF properties
     opts.set_max_open_files(512);
 
     let db = DB::open_cf_for_read_only(&opts, primary_path, CF_NAMES, false)?;
 
-    let mut total: u64 = 0;
+    let mut cf_entries: HashMap<String, (u64, u64)> = HashMap::new();
+    for f in db.live_files()? {
+        let (entries, deletions) = cf_entries.entry(f.column_family_name).or_default();
+        *entries += f.num_entries;
+        *deletions += f.num_deletions;
+    }
+
+    let mut total_sst: u64 = 0;
+    let mut total_live: u64 = 0;
+    let mut total_tombstones: u64 = 0;
+    let mut total_pending: u64 = 0;
+
     println!(
-        "{:<20} {:>14} {:>16} {:>16}",
-        "CF", "num_keys", "sst_size", "live_data"
+        "{:<20} {:>14} {:>14} {:>16} {:>16} {:>16} {:>16}",
+        "CF", "num_entries", "tombstones", "sst_size", "live_data", "waste", "pending_compact"
     );
     for name in CF_NAMES {
         let cf = db.cf_handle(name).expect("cf must exist");
 
-        let num_keys: u64 = db
-            .property_int_value_cf(cf, "rocksdb.estimate-num-keys")?
-            .unwrap_or(0);
         let sst_size: u64 = db
             .property_int_value_cf(cf, "rocksdb.total-sst-files-size")?
             .unwrap_or(0);
         let live_size: u64 = db
             .property_int_value_cf(cf, "rocksdb.estimate-live-data-size")?
             .unwrap_or(0);
+        let pending_compact: u64 = db
+            .property_int_value_cf(cf, "rocksdb.estimate-pending-compaction-bytes")?
+            .unwrap_or(0);
 
-        total += sst_size;
+        let (num_entries, tombstones) = cf_entries.get(*name).copied().unwrap_or_default();
+        let waste = sst_size.saturating_sub(live_size);
+
+        total_sst += sst_size;
+        total_live += live_size;
+        total_tombstones += tombstones;
+        total_pending += pending_compact;
+
         println!(
-            "{:<20} {:>14} {:>16} {:>16}",
+            "{:<20} {:>14} {:>14} {:>16} {:>16} {:>16} {:>16}",
             name,
-            num_keys,
+            num_entries,
+            tombstones,
             human(sst_size),
-            human(live_size)
+            human(live_size),
+            human(waste),
+            human(pending_compact),
         );
     }
+
+    let total_waste = total_sst.saturating_sub(total_live);
+    let space_amp = if total_live > 0 {
+        total_sst as f64 / total_live as f64
+    } else {
+        0.0
+    };
+
     println!("---");
-    println!("total sst size: {}", human(total));
+    println!("total sst size:       {}", human(total_sst));
+    println!("total live data:      {}", human(total_live));
+    println!("total waste:          {}", human(total_waste));
+    println!("total tombstones:     {total_tombstones}");
+    println!("total pending compact:{}", human(total_pending));
+    println!("space amplification:  {space_amp:.2}x");
 
     Ok(())
 }

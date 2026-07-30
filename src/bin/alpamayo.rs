@@ -99,7 +99,11 @@ fn try_main() -> anyhow::Result<()> {
     // Open Rocksdb for slots and indexes
     let ts = Instant::now();
     let (db_write, db_write_inflation_reward, db_read, db_threads) =
-        storage::rocksdb::Rocksdb::open(config.storage.rocksdb.clone(), sync_tx.clone())?;
+        storage::rocksdb::Rocksdb::open(
+            config.storage.rocksdb.clone(),
+            config.storage.blocks.max,
+            sync_tx.clone(),
+        )?;
     info!(elapsed = ?ts.elapsed(), "rocksdb opened");
     threads.extend(db_threads);
 
