@@ -68,7 +68,9 @@ pub enum StreamSourceSlotStatus {
 
 #[derive(Debug)]
 pub enum StreamSourceMessage {
-    Start,
+    Start {
+        from_slot_resumed: bool,
+    },
     Block {
         slot: Slot,
         block: BlockWithBinary,
@@ -191,7 +193,11 @@ impl Drop for StreamSource {
 }
 
 impl StreamSource {
-    pub async fn new(config: ConfigSourceStream, index_vote: bool) -> Result<Self, ConnectError> {
+    pub async fn new(
+        config: ConfigSourceStream,
+        index_vote: bool,
+        from_slot: Option<Slot>,
+    ) -> Result<Self, ConnectError> {
         let mut connection = config.config.connect().await?;
 
         let version = connection.get_version().await?;
@@ -205,12 +211,12 @@ impl StreamSource {
 
         let stream = match config.source {
             ConfigSourceStreamKind::DragonsMouth => connection
-                .subscribe_dragons_mouth_once(Self::create_dragons_mouth_filter())
+                .subscribe_dragons_mouth_once(Self::create_dragons_mouth_filter(from_slot))
                 .await?
                 .into_parsed(),
             ConfigSourceStreamKind::Richat => connection
                 .subscribe_richat(GrpcSubscribeRequest {
-                    replay_from_slot: None,
+                    replay_from_slot: from_slot,
                     filter: Self::create_richat_filter(),
                 })
                 .await?
@@ -234,7 +240,7 @@ impl StreamSource {
         })
     }
 
-    fn create_dragons_mouth_filter() -> SubscribeRequest {
+    fn create_dragons_mouth_filter(from_slot: Option<Slot>) -> SubscribeRequest {
         SubscribeRequest {
             accounts: hashmap! {},
             slots: hashmap! { "".to_owned() => SubscribeRequestFilterSlots {
@@ -249,7 +255,7 @@ impl StreamSource {
             commitment: Some(CommitmentLevelProto::Processed as i32),
             accounts_data_slice: vec![],
             ping: None,
-            from_slot: None,
+            from_slot,
         }
     }
 }

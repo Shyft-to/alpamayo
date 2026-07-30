@@ -6,6 +6,7 @@ use {
             http::{GetBlockError, HttpSource},
             stream::{StreamSource, StreamSourceMessage},
         },
+        storage::slots::StoredSlots,
     },
     futures::stream::StreamExt,
     solana_clock::Slot,
@@ -103,9 +104,16 @@ pub async fn start(
     stream_tx: mpsc::Sender<StreamSourceMessage>,
     shutdown: CancellationToken,
     index_vote: bool,
+    stored_slots: StoredSlots,
 ) -> anyhow::Result<()> {
     let http = Arc::new(HttpSource::new(config.http, index_vote).await?);
-    let stream = start_stream(config.stream, stream_tx, stream_start, index_vote);
+    let stream = start_stream(
+        config.stream,
+        stream_tx,
+        stream_start,
+        index_vote,
+        stored_slots,
+    );
 
     tokio::pin!(shutdown);
     tokio::pin!(stream);
@@ -128,16 +136,31 @@ async fn start_stream(
     stream_tx: mpsc::Sender<StreamSourceMessage>,
     stream_start: Arc<Notify>,
     index_vote: bool,
+    stored_slots: StoredSlots,
 ) -> anyhow::Result<()> {
     let mut backoff_duration = config.reconnect.map(|c| c.backoff_max);
     let backoff_max = config.reconnect.map(|c| c.backoff_max).unwrap_or_default();
+    let from_slot_max_attempts = config
+        .reconnect
+        .map(|c| c.from_slot_max_attempts)
+        .unwrap_or(2);
 
     stream_start.notified().await;
     loop {
+        let confirmed_slot = stored_slots.confirmed_load();
+        let mut from_slot = (confirmed_slot != Slot::MIN).then_some(confirmed_slot + 1);
+        let mut from_slot_attempts = 0u8;
+
         let mut stream = loop {
-            match StreamSource::new(config.clone(), index_vote).await {
+            match StreamSource::new(config.clone(), index_vote, from_slot).await {
                 Ok(stream) => break stream,
                 Err(error) => {
+                    if from_slot.is_some() {
+                        from_slot_attempts += 1;
+                        if from_slot_attempts >= from_slot_max_attempts {
+                            from_slot = None;
+                        }
+                    }
                     if let Some(sleep_duration) = backoff_duration {
                         error!(?error, "failed to connect to gRPC stream");
                         sleep(sleep_duration).await;
@@ -148,7 +171,12 @@ async fn start_stream(
                 }
             }
         };
-        if stream_tx.send(StreamSourceMessage::Start).await.is_err() {
+        let from_slot_resumed = from_slot.is_some();
+        if stream_tx
+            .send(StreamSourceMessage::Start { from_slot_resumed })
+            .await
+            .is_err()
+        {
             error!("failed to send a message to the stream");
             return Ok(());
         }

@@ -141,6 +141,7 @@ pub struct ConfigSourceStreamReconnect {
     pub backoff_init: Duration,
     #[serde(with = "humantime_serde")]
     pub backoff_max: Duration,
+    pub from_slot_max_attempts: u8,
 }
 
 impl Default for ConfigSourceStreamReconnect {
@@ -148,6 +149,7 @@ impl Default for ConfigSourceStreamReconnect {
         Self {
             backoff_init: Duration::from_millis(100),
             backoff_max: Duration::from_secs(1),
+            from_slot_max_attempts: 2,
         }
     }
 }

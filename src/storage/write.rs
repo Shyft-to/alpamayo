@@ -378,10 +378,21 @@ async fn start2(
                 Some(message) => {
                     // add message
                     match message {
-                        StreamSourceMessage::Start => {
+                        StreamSourceMessage::Start { from_slot_resumed } => {
                             storage_memory = StorageMemory::default();
+
+                            if !from_slot_resumed {
+                                let slot_node = load_confirmed_slot(&http, &stored_slots, &sync_tx).await?;
+                                info!(
+                                    slot_db = next_confirmed_slot,
+                                    slot_node,
+                                    diff = slot_node.saturating_sub(next_confirmed_slot),
+                                    "trying to catch-up the node"
+                                );
+                            }
                         }
                         StreamSourceMessage::Block { slot, block } => {
+                            debug!(slot, "slot fully assembled from grpc");
                             let block = Arc::new(block);
                             storage_memory.add_processed(slot, Arc::clone(&block));
                             let _ = sync_tx.send(ReadWriteSyncMessage::BlockNew { slot, block });

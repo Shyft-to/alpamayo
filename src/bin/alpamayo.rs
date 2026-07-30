@@ -118,6 +118,7 @@ fn try_main() -> anyhow::Result<()> {
                     stream_tx,
                     shutdown.clone(),
                     config.storage.index_vote_transactions,
+                    stored_slots.clone(),
                 ))
                 .map_err(Into::into)
                 .and_then(ready)
