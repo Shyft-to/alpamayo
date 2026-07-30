@@ -585,9 +585,9 @@ impl RpcRequestBlock {
         if self.upstream_disabled {
             return Ok(jsonrpc_response_success(self.id, None::<()>));
         }
-        debug!(self.slot, reason = ?reason, "getBlock slot going upstream");
 
         if let Some(upstream) = self.state.get_upstream(ConfigRpcCallJson::GetBlock) {
+            debug!(self.slot, reason = ?reason, "getBlock slot going upstream");
             upstream
                 .get_block(
                     self.x_subscription_id,
@@ -3290,9 +3290,9 @@ impl RpcRequestTransaction {
         if self.upstream_disabled {
             return Ok(jsonrpc_response_success(self.id, None::<()>));
         }
-        debug!(%self.signature, reason = ?reason, "getTransaction signature going upstream");
 
         if let Some(upstream) = self.state.get_upstream(ConfigRpcCallJson::GetTransaction) {
+            debug!(%self.signature, reason = ?reason, "getTransaction signature going upstream");
             upstream
                 .get_transaction(
                     self.x_subscription_id,
