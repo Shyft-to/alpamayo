@@ -26,21 +26,52 @@ use {
         },
         metrics::RPC_REQUESTS_TOTAL,
     },
+    serde::Deserialize,
     solana_clock::Slot,
     solana_signature::Signature,
     std::{
         collections::HashSet,
         str::FromStr,
-        sync::Arc,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
         time::{Duration, Instant},
     },
     tokio::sync::{mpsc, oneshot},
+    tracing::info,
 };
+
+#[derive(Debug, Deserialize)]
+struct SetHealthRequest {
+    enabled: bool,
+}
+
+fn tokens_match(a: &str, b: &str) -> bool {
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+            == 0
+}
+
+fn response_401() -> HttpResult<RpcResponse> {
+    hyper::Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .body(BodyFull::from(Bytes::new()).boxed())
+}
+
+fn response_404() -> HttpResult<RpcResponse> {
+    hyper::Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .body(BodyFull::from(Bytes::new()).boxed())
+}
 
 #[derive(Debug)]
 struct SupportedCalls {
     get_block: Option<Regex>,
     get_transaction: Option<Regex>,
+    set_health: bool,
 }
 
 impl SupportedCalls {
@@ -54,6 +85,7 @@ impl SupportedCalls {
                 .contains(&ConfigRpcCallHttpGet::GetTransaction)
                 .then(|| Regex::new(r"^/tx/([1-9A-HJ-NP-Za-km-z]{64,88})/?$"))
                 .transpose()?,
+            set_health: calls.contains(&ConfigRpcCallHttpGet::SetHealth),
         })
     }
 }
@@ -66,6 +98,8 @@ pub struct State {
     supported_calls: SupportedCalls,
     requests_tx: mpsc::Sender<ReadRequest>,
     upstreams: Vec<RpcClientHttpget>,
+    admin_token: Option<String>,
+    health_disabled: Arc<AtomicBool>,
 }
 
 impl State {
@@ -73,6 +107,7 @@ impl State {
         config: &ConfigRpc,
         stored_slots: StoredSlots,
         requests_tx: mpsc::Sender<ReadRequest>,
+        health_disabled: Arc<AtomicBool>,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             stored_slots,
@@ -85,6 +120,8 @@ impl State {
                 .iter()
                 .map(|config| RpcClientHttpget::new(config.clone()))
                 .collect::<Result<_, _>>()?,
+            admin_token: config.admin_token.clone(),
+            health_disabled,
         })
     }
 
@@ -118,6 +155,15 @@ impl State {
             }));
         }
 
+        if self.supported_calls.set_health && path == "/admin/health" {
+            return Some(Box::pin(async move {
+                match self.process_admin_health(req).await {
+                    Ok(response) => response,
+                    Err(error) => response_500(error),
+                }
+            }));
+        }
+
         if path == "/version" {
             return Some(Box::pin(async move {
                 response_200(
@@ -133,6 +179,43 @@ impl State {
         }
 
         None
+    }
+
+    async fn process_admin_health(
+        &self,
+        req: hyper::Request<BodyIncoming>,
+    ) -> anyhow::Result<HttpResult<RpcResponse>> {
+        let Some(admin_token) = &self.admin_token else {
+            return Ok(response_404());
+        };
+
+        if req.method() != hyper::Method::POST {
+            return Ok(response_404());
+        }
+
+        let authorized = req
+            .headers()
+            .get(hyper::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .is_some_and(|token| tokens_match(token, admin_token));
+        if !authorized {
+            return Ok(response_401());
+        }
+
+        let body = req.into_body().collect().await?.to_bytes();
+        let SetHealthRequest { enabled } = match serde_json::from_slice(&body) {
+            Ok(parsed) => parsed,
+            Err(error) => return Ok(response_400(format!("{error}\n"), "InvalidParams".into())),
+        };
+
+        self.health_disabled.store(!enabled, Ordering::Relaxed);
+        info!(enabled, "setHealth toggled via /admin/health");
+
+        Ok(response_200(
+            serde_json::json!({ "enabled": enabled }).to_string(),
+            &self.extra_headers,
+        ))
     }
 
     async fn process_block(
