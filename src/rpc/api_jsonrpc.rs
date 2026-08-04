@@ -73,7 +73,7 @@ use {
         str::FromStr,
         sync::{
             Arc,
-            atomic::{AtomicU64, Ordering},
+            atomic::{AtomicBool, AtomicU64, Ordering},
         },
         time::{Duration, Instant},
     },
@@ -115,6 +115,7 @@ pub struct State {
     workers: Sender<WorkRequest>,
     cluster_processed_slot: Arc<AtomicU64>,
     health_check_slot_distance: u64,
+    health_disabled: Arc<AtomicBool>,
 }
 
 impl State {
@@ -125,6 +126,7 @@ impl State {
         db_write_inflation_reward: RocksdbWriteInflationReward,
         workers: Sender<WorkRequest>,
         cluster_processed_slot: Arc<AtomicU64>,
+        health_disabled: Arc<AtomicBool>,
     ) -> anyhow::Result<Self> {
         let upstreams = config
             .upstream_jsonrpc
@@ -165,6 +167,7 @@ impl State {
             workers,
             cluster_processed_slot,
             health_check_slot_distance: config.health_check.slot_distance,
+            health_disabled,
         })
     }
 
@@ -181,6 +184,7 @@ pub fn create_request_processor(
     requests_tx: mpsc::Sender<ReadRequest>,
     db_write_inflation_reward: RocksdbWriteInflationReward,
     workers: Sender<WorkRequest>,
+    health_disabled: Arc<AtomicBool>,
 ) -> anyhow::Result<RpcRequestsProcessor<Arc<State>>> {
     let calls = &config.calls_jsonrpc;
     let needs_poller =
@@ -192,6 +196,7 @@ pub fn create_request_processor(
         db_write_inflation_reward,
         workers,
         Arc::new(AtomicU64::new(0)),
+        health_disabled,
     )?;
     let poller_slot = needs_poller.then(|| Arc::clone(&state.cluster_processed_slot));
     let mut processor =
@@ -3444,6 +3449,14 @@ impl RpcRequestHandler for RpcRequestHealth {
         request: Request<'_>,
     ) -> Result<Self, Vec<u8>> {
         let request = no_params_expected(request)?;
+        if state.health_disabled.load(Ordering::Relaxed) {
+            return Err(jsonrpc_response_error_custom(
+                request.id,
+                RpcCustomError::NodeUnhealthy {
+                    num_slots_behind: None,
+                },
+            ));
+        }
         let cluster_slot = state.cluster_processed_slot.load(Ordering::Relaxed);
         if cluster_slot == 0 {
             return Err(jsonrpc_response_success(request.id, "ok"));

@@ -11,7 +11,7 @@ use {
         rt::tokio::{TokioExecutor, TokioIo},
         server::conn::auto::Builder as ServerBuilder,
     },
-    std::sync::Arc,
+    std::sync::{Arc, atomic::AtomicBool},
     tokio::{net::TcpListener, sync::mpsc, task::JoinError},
     tokio_util::sync::CancellationToken,
     tracing::{debug, error, info},
@@ -29,10 +29,13 @@ pub async fn spawn(
     let listener = TcpListener::bind(config.endpoint).await?;
     info!("start server at: {}", config.endpoint);
 
+    let health_disabled = Arc::new(AtomicBool::new(false));
+
     let api_httpget_state = Arc::new(api_httpget::State::new(
         &config,
         stored_slots.clone(),
         requests_tx.clone(),
+        Arc::clone(&health_disabled),
     )?);
     let api_jsonrpc_processor = Arc::new(api_jsonrpc::create_request_processor(
         config,
@@ -40,6 +43,7 @@ pub async fn spawn(
         requests_tx,
         db_write_inflation_reward,
         workers_tx,
+        health_disabled,
     )?);
 
     let jh = tokio::spawn(async move {

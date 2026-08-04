@@ -387,6 +387,9 @@ pub struct ConfigRpc {
     /// Health check options for getHealth
     #[serde(default)]
     pub health_check: ConfigRpcHealthCheck,
+    /// Bearer token for admin endpoints (e.g. POST /admin/health). Endpoint disabled if unset.
+    #[serde(default)]
+    pub admin_token: Option<String>,
 }
 
 impl ConfigRpc {
@@ -467,6 +470,7 @@ impl Default for ConfigRpcHealthCheck {
 pub enum ConfigRpcCallHttpGet {
     GetBlock,
     GetTransaction,
+    SetHealth,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
