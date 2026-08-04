@@ -1097,7 +1097,11 @@ impl RpcRequestHandler for RpcRequestBlockTime {
 impl RpcRequestBlockTime {
     async fn fetch_upstream(self, deadline: Instant, reason: &'static str) -> RpcRequestResult {
         if self.upstream_disabled {
-            return Ok(jsonrpc_response_success(self.id, None::<()>));
+            return Ok(Self::error_cleaned_up(
+                self.id,
+                self.slot,
+                self.state.stored_slots.first_available_load(),
+            ));
         }
 
         if let Some(upstream) = self.state.get_upstream(ConfigRpcCallJson::GetBlockTime) {
@@ -1111,8 +1115,22 @@ impl RpcRequestBlockTime {
                 )
                 .await
         } else {
-            Ok(jsonrpc_response_success(self.id, json!(None::<()>)))
+            Ok(Self::error_cleaned_up(
+                self.id,
+                self.slot,
+                self.state.stored_slots.first_available_load(),
+            ))
         }
+    }
+
+    fn error_cleaned_up(id: Id<'static>, slot: Slot, first_available_block: Slot) -> Vec<u8> {
+        jsonrpc_response_error_custom(
+            id,
+            RpcCustomError::BlockCleanedUp {
+                slot,
+                first_available_block,
+            },
+        )
     }
 }
 
