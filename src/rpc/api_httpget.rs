@@ -39,6 +39,7 @@ use {
         time::{Duration, Instant},
     },
     tokio::sync::{mpsc, oneshot},
+    tracing::info,
 };
 
 #[derive(Debug, Deserialize)]
@@ -209,6 +210,7 @@ impl State {
         };
 
         self.health_disabled.store(!enabled, Ordering::Relaxed);
+        info!(enabled, "setHealth toggled via /admin/health");
 
         Ok(response_200(
             serde_json::json!({ "enabled": enabled }).to_string(),
