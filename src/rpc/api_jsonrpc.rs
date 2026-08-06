@@ -927,6 +927,13 @@ impl RpcRequestHandler for RpcRequestBlocks {
         match result {
             ReadResultBlocks::Timeout => anyhow::bail!("timeout"),
             ReadResultBlocks::Blocks(blocks) => Ok(jsonrpc_response_success(self.id, &blocks)),
+            ReadResultBlocks::Removed => Ok(jsonrpc_response_error_custom(
+                self.id,
+                RpcCustomError::BlockCleanedUp {
+                    slot: self.start_slot,
+                    first_available_block: self.state.stored_slots.first_available_load(),
+                },
+            )),
             ReadResultBlocks::ReadError(error) => anyhow::bail!("read error: {error}"),
         }
     }
@@ -1582,6 +1589,13 @@ impl RpcRequestInflationReward {
         match result {
             ReadResultBlocks::Timeout => anyhow::bail!("timeout"),
             ReadResultBlocks::Blocks(blocks) => Ok(Ok(blocks)),
+            ReadResultBlocks::Removed => Ok(Err(jsonrpc_response_error_custom(
+                self.id.clone(),
+                RpcCustomError::BlockCleanedUp {
+                    slot: start_slot,
+                    first_available_block: self.state.stored_slots.first_available_load(),
+                },
+            ))),
             ReadResultBlocks::ReadError(error) => anyhow::bail!("read error: {error}"),
         }
     }
