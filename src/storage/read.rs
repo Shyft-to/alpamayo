@@ -446,6 +446,7 @@ pub enum ReadResultBlockHeight {
 pub enum ReadResultBlocks {
     Timeout,
     Blocks(Vec<Slot>),
+    Removed,
     ReadError(anyhow::Error),
 }
 
@@ -860,38 +861,49 @@ impl ReadRequest {
                     return None;
                 }
 
-                let result = match blocks.get_blocks(
-                    start_slot,
-                    if commitment.is_confirmed() {
-                        if confirmed_in_process.is_some() {
-                            storage_processed.confirmed_slot - 1
+                let result = if blocks
+                    .get_back_slot()
+                    .is_none_or(|tail_slot| start_slot < tail_slot)
+                {
+                    ReadResultBlocks::Removed
+                } else {
+                    match blocks.get_blocks(
+                        start_slot,
+                        if commitment.is_confirmed() {
+                            if confirmed_in_process.is_some() {
+                                storage_processed.confirmed_slot - 1
+                            } else {
+                                storage_processed.confirmed_slot
+                            }
                         } else {
-                            storage_processed.confirmed_slot
-                        }
-                    } else {
-                        storage_processed.finalized_slot
-                    },
-                    until,
-                ) {
-                    Ok(mut blocks) => {
-                        // block is Some(_) if not dead
-                        if commitment.is_confirmed()
-                            && let Some((slot, Some(_))) = confirmed_in_process
-                        {
-                            let slot = *slot;
-                            if slot >= start_slot {
-                                let should_push = match until {
-                                    RpcRequestBlocksUntil::EndSlot(end_slot) => slot <= end_slot,
-                                    RpcRequestBlocksUntil::Limit(limit) => blocks.len() < limit,
-                                };
-                                if should_push {
-                                    blocks.push(slot);
+                            storage_processed.finalized_slot
+                        },
+                        until,
+                    ) {
+                        Ok(mut blocks) => {
+                            // block is Some(_) if not dead
+                            if commitment.is_confirmed()
+                                && let Some((slot, Some(_))) = confirmed_in_process
+                            {
+                                let slot = *slot;
+                                if slot >= start_slot {
+                                    let should_push = match until {
+                                        RpcRequestBlocksUntil::EndSlot(end_slot) => {
+                                            slot <= end_slot
+                                        }
+                                        RpcRequestBlocksUntil::Limit(limit) => {
+                                            blocks.len() < limit
+                                        }
+                                    };
+                                    if should_push {
+                                        blocks.push(slot);
+                                    }
                                 }
                             }
+                            ReadResultBlocks::Blocks(blocks)
                         }
-                        ReadResultBlocks::Blocks(blocks)
+                        Err(error) => ReadResultBlocks::ReadError(error),
                     }
-                    Err(error) => ReadResultBlocks::ReadError(error),
                 };
 
                 let _ = tx.send(result);

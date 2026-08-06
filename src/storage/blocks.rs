@@ -409,6 +409,11 @@ impl StoredBlocksRead {
             "end slot out of limit"
         );
 
+        let scan_end_slot = match until {
+            RpcRequestBlocksUntil::EndSlot(requested_end) => end_slot.min(requested_end),
+            RpcRequestBlocksUntil::Limit(_) => end_slot,
+        };
+
         let mut blocks = Vec::with_capacity(match until {
             RpcRequestBlocksUntil::EndSlot(end_slot) => (end_slot - start_slot) as usize,
             RpcRequestBlocksUntil::Limit(limit) => limit,
@@ -417,7 +422,7 @@ impl StoredBlocksRead {
         let mut index = (self.tail + (start_slot - tail.slot) as usize) % self.blocks.len();
         loop {
             let block = self.blocks[index];
-            if !block.exists || block.slot > end_slot {
+            if !block.exists || block.slot > scan_end_slot {
                 break;
             }
             if let RpcRequestBlocksUntil::Limit(limit) = until
@@ -430,6 +435,9 @@ impl StoredBlocksRead {
                 blocks.push(block.slot);
             }
 
+            if index == self.head {
+                break;
+            }
             index = (index + 1) % self.blocks.len();
         }
 
