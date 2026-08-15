@@ -268,35 +268,31 @@ impl TransactionIndexValue<'_> {
         let offset = decode_varint(&mut slice).context("failed to decode offset")?;
         let size = decode_varint(&mut slice).context("failed to decode size")?;
 
-        let err_size = if slice.is_empty() {
-            None
+        // records written before `err`/`index` existed have no trailing bytes here
+        let (err, index) = if slice.is_empty() {
+            (None, 0)
         } else {
-            Some(decode_varint(&mut slice).context("failed to decode err size")? as usize)
-        };
-        let err = match err_size {
-            None => None,
-            Some(err_size) => {
-                anyhow::ensure!(
-                    slice.remaining() >= err_size,
-                    "invalid slice len to decode err, expected at least {} left {}",
-                    err_size,
-                    slice.remaining()
-                );
+            let a = decode_varint(&mut slice).context("failed to decode err size")?;
+            // `index` is always the terminal field with nothing after it, and a real
+            // serialized err is never 0 bytes, so if `a` can't be a valid err length
+            // (too large, or exactly 0) it must be the bare `index` varint instead.
+            if a == 0 || (slice.remaining() as u64) < a {
+                (None, a as u32)
+            } else {
+                let err_size = a as usize;
                 let err = decode_error
                     .then(|| bincode::deserialize(&slice[0..err_size]))
                     .transpose()
                     .context("failed to decode err")?
                     .map(Cow::Owned);
                 slice.advance(err_size);
-                err
+                let index = if slice.is_empty() {
+                    0
+                } else {
+                    decode_varint(&mut slice).context("failed to decode index")? as u32
+                };
+                (err, index)
             }
-        };
-
-        // records written before `index` existed have no trailing bytes here
-        let index = if slice.is_empty() {
-            0
-        } else {
-            decode_varint(&mut slice).context("failed to decode index")? as u32
         };
 
         Ok(Self {
