@@ -40,10 +40,10 @@ rand = "0.9.1"
 rayon = "1.10.0"
 regex = "1.11.1"
 reqwest = "0.12.28"
-richat-client = "8.0.0"
-richat-metrics = "1.0.1"
-richat-proto = "8.0.0"
-richat-shared = { version = "8.0.0", default-features = false, features = ["config", "jsonrpc", "version"] }
+richat-client = { git = "https://github.com/impin2rex/richat", branch = "feat/agave-4.2-upgrade" }
+richat-metrics = { git = "https://github.com/impin2rex/richat", branch = "feat/agave-4.2-upgrade" }
+richat-proto = { git = "https://github.com/impin2rex/richat", branch = "feat/agave-4.2-upgrade" }
+richat-shared = { git = "https://github.com/impin2rex/richat", branch = "feat/agave-4.2-upgrade", default-features = false, features = ["config", "jsonrpc", "version"] }
 rocksdb = "0.24.0"
 rustls = "0.23.36"
 serde = { version = "1.0.218", features = ["derive"] }
@@ -59,16 +59,16 @@ solana-epoch-rewards-hasher = "3.1.0"
 solana-epoch-schedule = "3.0.0"
 solana-hash = "4.0.1"
 solana-instruction-error = "2.1.0"
-solana-message = "3.0.1"
+solana-message = "4.1.1"
 solana-pubkey = "4.0.0"
-solana-rpc-client = "~3.1.0"
-solana-rpc-client-api = "~3.1.0"
+solana-rpc-client = "4.2.0"
+solana-rpc-client-api = "4.2.0"
 solana-signature = "3.1.0"
-solana-storage-proto = { version = "~3.1.0", features = ["agave-unstable-api"] }
-solana-transaction = "3.0.2"
-solana-transaction-context = "~3.1.0"
-solana-transaction-status = "~3.1.0"
-solana-version = "~3.1.0"
+solana-storage-proto = { version = "4.2.0", features = ["agave-unstable-api"] }
+solana-transaction = "4.1.1"
+solana-transaction-context = "4.2.0"
+solana-transaction-status = "4.2.0"
+solana-version = "4.2.0"
 solana-vote-interface = "4.0.4"
 thiserror = "2.0.11"
 tikv-jemallocator = { version = "0.6.0", features = ["unprefixed_malloc_on_supported_platforms"] }

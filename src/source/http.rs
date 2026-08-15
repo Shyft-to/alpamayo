@@ -305,6 +305,12 @@ impl HttpSource {
                         recent_blockhash: v0.recent_blockhash,
                         instructions: v0.instructions,
                     },
+                    VersionedMessage::V1(v1) => Message {
+                        header: v1.header,
+                        account_keys: v1.account_keys,
+                        recent_blockhash: v1.lifetime_specifier,
+                        instructions: v1.instructions,
+                    },
                 },
             })),
         }
