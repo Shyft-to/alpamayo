@@ -26,7 +26,7 @@ use {
     },
     solana_storage_proto::convert::generated,
     solana_transaction::Transaction,
-    solana_transaction_context::TransactionReturnData,
+    solana_transaction_context::transaction::TransactionReturnData,
     solana_transaction_status::{
         ConfirmedBlock, EncodedTransactionWithStatusMeta, InnerInstruction, InnerInstructions,
         TransactionDetails, TransactionStatusMeta, TransactionTokenBalance,

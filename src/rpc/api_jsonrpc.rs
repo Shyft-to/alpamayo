@@ -3518,7 +3518,7 @@ impl RpcRequestHandler for RpcRequestVersion {
             request.id,
             json!(RpcVersionInfo {
                 solana_core: version.to_string(),
-                feature_set: Some(version.feature_set),
+                feature_set: Some(version.feature_set()),
             }),
         ))
     }
