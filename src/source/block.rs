@@ -257,9 +257,8 @@ impl Deref for RewardWrapper<'_> {
 }
 
 impl Message for RewardWrapper<'_> {
-    fn encode_raw<B>(&self, buf: &mut B)
+    fn encode_raw(&self, buf: &mut impl BufMut)
     where
-        B: BufMut,
         Self: Sized,
     {
         if !self.pubkey.is_empty() {
@@ -310,15 +309,14 @@ impl Message for RewardWrapper<'_> {
         unimplemented!()
     }
 
-    fn merge_field<B>(
+    fn merge_field(
         &mut self,
         _tag: u32,
         _wire_type: WireType,
-        _buf: &mut B,
+        _buf: &mut impl Buf,
         _ctx: DecodeContext,
     ) -> Result<(), DecodeError>
     where
-        B: Buf,
         Self: Sized,
     {
         unimplemented!()
