@@ -3159,7 +3159,7 @@ dependencies = [
 [[package]]
 name = "richat-client"
 version = "9.0.0"
-source = "git+https://github.com/impin2rex/richat?branch=feat%2Fagave-4.2-upgrade#bee81f8e56c5fe5d1acc9a3c93ab01210ea78772"
+source = "git+https://github.com/Shyft-to/richat?branch=feat%2Fagave-4.2-upgrade#bee81f8e56c5fe5d1acc9a3c93ab01210ea78772"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3188,7 +3188,7 @@ dependencies = [
 [[package]]
 name = "richat-metrics"
 version = "1.0.1"
-source = "git+https://github.com/impin2rex/richat?branch=feat%2Fagave-4.2-upgrade#bee81f8e56c5fe5d1acc9a3c93ab01210ea78772"
+source = "git+https://github.com/Shyft-to/richat?branch=feat%2Fagave-4.2-upgrade#bee81f8e56c5fe5d1acc9a3c93ab01210ea78772"
 dependencies = [
  "http",
  "http-body-util",
@@ -3203,7 +3203,7 @@ dependencies = [
 [[package]]
 name = "richat-proto"
 version = "9.0.0"
-source = "git+https://github.com/impin2rex/richat?branch=feat%2Fagave-4.2-upgrade#bee81f8e56c5fe5d1acc9a3c93ab01210ea78772"
+source = "git+https://github.com/Shyft-to/richat?branch=feat%2Fagave-4.2-upgrade#bee81f8e56c5fe5d1acc9a3c93ab01210ea78772"
 dependencies = [
  "anyhow",
  "bincode",
@@ -3228,7 +3228,7 @@ dependencies = [
 [[package]]
 name = "richat-shared"
 version = "9.0.0"
-source = "git+https://github.com/impin2rex/richat?branch=feat%2Fagave-4.2-upgrade#bee81f8e56c5fe5d1acc9a3c93ab01210ea78772"
+source = "git+https://github.com/Shyft-to/richat?branch=feat%2Fagave-4.2-upgrade#bee81f8e56c5fe5d1acc9a3c93ab01210ea78772"
 dependencies = [
  "affinity-linux",
  "anyhow",

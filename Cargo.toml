@@ -40,10 +40,10 @@ rand = "0.9.1"
 rayon = "1.10.0"
 regex = "1.11.1"
 reqwest = "0.12.28"
-richat-client = { git = "https://github.com/impin2rex/richat", branch = "feat/agave-4.2-upgrade" }
-richat-metrics = { git = "https://github.com/impin2rex/richat", branch = "feat/agave-4.2-upgrade" }
-richat-proto = { git = "https://github.com/impin2rex/richat", branch = "feat/agave-4.2-upgrade" }
-richat-shared = { git = "https://github.com/impin2rex/richat", branch = "feat/agave-4.2-upgrade", default-features = false, features = ["config", "jsonrpc", "version"] }
+richat-client = { git = "https://github.com/Shyft-to/richat", branch = "feat/agave-4.2-upgrade" }
+richat-metrics = { git = "https://github.com/Shyft-to/richat", branch = "feat/agave-4.2-upgrade" }
+richat-proto = { git = "https://github.com/Shyft-to/richat", branch = "feat/agave-4.2-upgrade" }
+richat-shared = { git = "https://github.com/Shyft-to/richat", branch = "feat/agave-4.2-upgrade", default-features = false, features = ["config", "jsonrpc", "version"] }
 rocksdb = "0.24.0"
 rustls = "0.23.36"
 serde = { version = "1.0.218", features = ["derive"] }
