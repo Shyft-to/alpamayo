@@ -67,7 +67,14 @@ impl TransactionFees {
             .iter()
             .enumerate()
         {
-            if tx.transaction.message.is_maybe_writable(index, None) {
+            if tx
+                .transaction
+                .message
+                .is_maybe_writable_with_reserved_addresses(
+                    index,
+                    None::<&std::collections::HashSet<Pubkey>>,
+                )
+            {
                 account_keys.insert(*pubkey);
             }
         }

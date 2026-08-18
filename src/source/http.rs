@@ -26,7 +26,7 @@ use {
     },
     solana_storage_proto::convert::generated,
     solana_transaction::Transaction,
-    solana_transaction_context::TransactionReturnData,
+    solana_transaction_context::transaction::TransactionReturnData,
     solana_transaction_status::{
         ConfirmedBlock, EncodedTransactionWithStatusMeta, InnerInstruction, InnerInstructions,
         TransactionDetails, TransactionStatusMeta, TransactionTokenBalance,
@@ -304,6 +304,12 @@ impl HttpSource {
                         account_keys: v0.account_keys,
                         recent_blockhash: v0.recent_blockhash,
                         instructions: v0.instructions,
+                    },
+                    VersionedMessage::V1(v1) => Message {
+                        header: v1.header,
+                        account_keys: v1.account_keys,
+                        recent_blockhash: v1.lifetime_specifier,
+                        instructions: v1.instructions,
                     },
                 },
             })),

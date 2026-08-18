@@ -525,6 +525,7 @@ pub enum ReadResultTransaction {
         slot: Slot,
         block_time: Option<UnixTimestamp>,
         bytes: Vec<u8>,
+        index: u32,
     },
     ReadError(anyhow::Error),
 }
@@ -891,9 +892,7 @@ impl ReadRequest {
                                         RpcRequestBlocksUntil::EndSlot(end_slot) => {
                                             slot <= end_slot
                                         }
-                                        RpcRequestBlocksUntil::Limit(limit) => {
-                                            blocks.len() < limit
-                                        }
+                                        RpcRequestBlocksUntil::Limit(limit) => blocks.len() < limit,
                                     };
                                     if should_push {
                                         blocks.push(slot);
@@ -1086,6 +1085,7 @@ impl ReadRequest {
                                 memo: item.memo.clone(),
                                 block_time: block.block_time,
                                 confirmation_status: Some(TransactionConfirmationStatus::Confirmed),
+                                transaction_index: Some(item.transaction_index),
                             });
 
                             if signatures.len() == signatures.capacity() {
@@ -1370,6 +1370,7 @@ impl ReadRequest {
                             memo: item.memo.clone(),
                             block_time: block.block_time,
                             confirmation_status: Some(TransactionConfirmationStatus::Confirmed),
+                            transaction_index: Some(item.transaction_index),
                         });
                         transaction_indices.push(item.transaction_index);
                         token_owner_flags.push(
@@ -1660,6 +1661,7 @@ impl ReadRequest {
                         slot: *confirmed_in_process_slot,
                         block_time: block.block_time,
                         bytes: transaction.protobuf.clone(),
+                        index: transaction.index,
                     });
                     return None;
                 }
@@ -1752,6 +1754,7 @@ impl ReadRequest {
                             slot: index.slot,
                             block_time: location.block_time,
                             bytes,
+                            index: index.index,
                         },
                         Ok(Err(error)) => {
                             ReadResultTransaction::ReadError(anyhow::Error::new(error))

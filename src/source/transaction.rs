@@ -22,6 +22,9 @@ pub struct TransactionWithBinary {
     pub sfa: Vec<SignatureForAddress>,
     pub fees: Option<TransactionFees>,
     pub protobuf: Vec<u8>,
+    /// Original transaction index within the block (independent of any vote filtering
+    /// applied afterwards to `BlockWithBinary::transactions`).
+    pub index: u32,
 }
 
 impl TransactionWithBinary {
@@ -120,6 +123,7 @@ impl TransactionWithBinary {
             sfa,
             fees,
             protobuf,
+            index: transaction_index,
         }
     }
 }

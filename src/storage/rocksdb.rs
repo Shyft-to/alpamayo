@@ -245,6 +245,9 @@ pub struct TransactionIndexValue<'a> {
     pub offset: u64,
     pub size: u64,
     pub err: Option<Cow<'a, TransactionError>>,
+    /// Transaction index within its block. `0` for records written before this field
+    /// existed (no way to recover it after the fact).
+    pub index: u32,
 }
 
 impl TransactionIndexValue<'_> {
@@ -257,26 +260,47 @@ impl TransactionIndexValue<'_> {
             encode_varint(data.len() as u64, buf);
             buf.extend_from_slice(&data);
         }
+        encode_varint(self.index as u64, buf);
     }
 
     fn decode(mut slice: &[u8], decode_error: bool) -> anyhow::Result<Self> {
-        Ok(Self {
-            slot: decode_varint(&mut slice).context("failed to decode slot")?,
-            offset: decode_varint(&mut slice).context("failed to decode offset")?,
-            size: decode_varint(&mut slice).context("failed to decode size")?,
-            err: if slice.is_empty() || !decode_error {
-                None
+        let slot = decode_varint(&mut slice).context("failed to decode slot")?;
+        let offset = decode_varint(&mut slice).context("failed to decode offset")?;
+        let size = decode_varint(&mut slice).context("failed to decode size")?;
+
+        // records written before `err`/`index` existed have no trailing bytes here
+        let (err, index) = if slice.is_empty() {
+            (None, 0)
+        } else {
+            let a = decode_varint(&mut slice).context("failed to decode err size")?;
+            // `index` is always the terminal field with nothing after it, and a real
+            // serialized err is never 0 bytes, so if `a` can't be a valid err length
+            // (too large, or exactly 0) it must be the bare `index` varint instead.
+            if a == 0 || (slice.remaining() as u64) < a {
+                (None, a as u32)
             } else {
-                let size = decode_varint(&mut slice).context("failed to decode err size")? as usize;
-                anyhow::ensure!(
-                    slice.remaining() == size,
-                    "invalid slice len to decode err, expected {} left {}",
-                    size,
-                    slice.remaining()
-                );
-                let err = bincode::deserialize(&slice[0..size]).context("failed to decode err")?;
-                Some(Cow::Owned(err))
-            },
+                let err_size = a as usize;
+                let err = decode_error
+                    .then(|| bincode::deserialize(&slice[0..err_size]))
+                    .transpose()
+                    .context("failed to decode err")?
+                    .map(Cow::Owned);
+                slice.advance(err_size);
+                let index = if slice.is_empty() {
+                    0
+                } else {
+                    decode_varint(&mut slice).context("failed to decode index")? as u32
+                };
+                (err, index)
+            }
+        };
+
+        Ok(Self {
+            slot,
+            offset,
+            size,
+            err,
+            index,
         })
     }
 }
@@ -531,8 +555,14 @@ impl InflationRewardAddressValue {
         encode_varint(self.reward.effective_slot, buf);
         encode_varint(self.reward.amount, buf);
         encode_varint(self.reward.post_balance, buf);
-        if let Some(comission) = self.reward.commission {
-            buf.put_u8(comission);
+        // commission_bps is only ever set alongside commission (SIMD-0291), so it's
+        // appended right after it; old records (pre commission_bps) end up exactly 0
+        // or 1 trailing bytes, which decode() below still reads correctly.
+        if let Some(commission) = self.reward.commission {
+            buf.put_u8(commission);
+            if let Some(commission_bps) = self.reward.commission_bps {
+                buf.put_u16_le(commission_bps);
+            }
         }
     }
 
@@ -542,10 +572,13 @@ impl InflationRewardAddressValue {
             decode_varint(&mut slice).context("failed to decode effective_slot")?;
         let amount = decode_varint(&mut slice).context("failed to decode amount")?;
         let post_balance = decode_varint(&mut slice).context("failed to decode post_balance")?;
-        let commission = if slice.is_empty() {
-            None
-        } else {
-            Some(slice[0])
+        let (commission, commission_bps) = match slice.len() {
+            0 => (None, None),
+            1 => (Some(slice[0]), None),
+            _ => (
+                Some(slice[0]),
+                Some(u16::from_le_bytes([slice[1], slice[2]])),
+            ),
         };
 
         Ok(Self {
@@ -555,6 +588,7 @@ impl InflationRewardAddressValue {
                 amount,
                 post_balance,
                 commission,
+                commission_bps,
             },
         })
     }
@@ -780,6 +814,7 @@ impl RocksdbWrite {
                             offset: tx_offset.offset,
                             size: tx_offset.size,
                             err: tx_offset.err.as_ref().map(Cow::Borrowed),
+                            index: tx_offset.index,
                         }
                         .encode(&mut buf);
                         batch.put_cf(
@@ -1555,6 +1590,7 @@ impl RocksdbRead {
                     memo: sigstatus.memo,
                     block_time: None,
                     confirmation_status: None,
+                    transaction_index: Some(sigstatus.transaction_index),
                 });
 
                 if signatures.len() == signatures.capacity() {
@@ -1651,6 +1687,7 @@ impl RocksdbRead {
                     memo: sigstatus.memo,
                     block_time: None,
                     confirmation_status: None,
+                    transaction_index: Some(sigstatus.transaction_index),
                 });
                 transaction_indices.push(sigstatus.transaction_index);
                 token_owner_flags.push(flags);

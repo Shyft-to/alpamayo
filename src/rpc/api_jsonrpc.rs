@@ -1439,6 +1439,7 @@ impl RpcRequestInflationReward {
                 let parititon_reward_map =
                     self.filter_rewards(slot, block.rewards, &|reward_type| {
                         reward_type == RewardType::Staking
+                            || reward_type == RewardType::DeactivatedStake
                     })?;
                 for index in missed {
                     if let Some(reward) = parititon_reward_map.get(&addresses[index]) {
@@ -1730,6 +1731,7 @@ impl RpcRequestInflationReward {
                         amount: reward.lamports.unsigned_abs(),
                         post_balance: reward.post_balance,
                         commission: reward.commission,
+                        commission_bps: reward.commission_bps,
                     };
                     Ok((pubkey, inflation_reward))
                 })
@@ -2908,10 +2910,13 @@ impl RpcRequestTransactionsForAddress {
         Ok(match result {
             ReadResultTransaction::Timeout => anyhow::bail!("timeout"),
             ReadResultTransaction::NotFound => None,
+            // `index` isn't used here: `build_full_entry` (the only caller) already has
+            // an authoritative transaction_index from the address-signature index scan.
             ReadResultTransaction::Transaction {
                 slot,
                 block_time,
                 bytes,
+                index: _,
             } => Some((slot, block_time, bytes)),
             ReadResultTransaction::ReadError(error) => anyhow::bail!("read error: {error}"),
         })
@@ -2961,6 +2966,7 @@ impl RpcRequestTransactionsForAddress {
                 slot,
                 tx_with_meta,
                 block_time,
+                index: transaction_index.map_or(0, |index| index as u32),
             };
             match confirmed_tx.encode(encoding, max_supported_transaction_version) {
                 Ok(encoded) => Ok(Ok(GtfaFullEntry {
@@ -3289,7 +3295,7 @@ impl RpcRequestHandler for RpcRequestTransaction {
         let Ok(result) = rx.await else {
             anyhow::bail!("rx channel is closed");
         };
-        let (slot, block_time, bytes) = match result {
+        let (slot, block_time, bytes, index) = match result {
             ReadResultTransaction::Timeout => anyhow::bail!("timeout"),
             ReadResultTransaction::NotFound => {
                 return self
@@ -3300,7 +3306,8 @@ impl RpcRequestHandler for RpcRequestTransaction {
                 slot,
                 block_time,
                 bytes,
-            } => (slot, block_time, bytes),
+                index,
+            } => (slot, block_time, bytes, index),
             ReadResultTransaction::ReadError(error) => anyhow::bail!("read error: {error}"),
         };
 
@@ -3316,7 +3323,7 @@ impl RpcRequestHandler for RpcRequestTransaction {
 
         // parse, encode and serialize
         process_with_workers(RpcRequestTransactionWorkRequest::create(
-            self, slot, block_time, bytes,
+            self, slot, block_time, bytes, index,
         ))
         .await
     }
@@ -3360,6 +3367,7 @@ pub struct RpcRequestTransactionWorkRequest {
     slot: Slot,
     block_time: Option<UnixTimestamp>,
     bytes: Vec<u8>,
+    index: u32,
     tx: Option<oneshot::Sender<RpcRequestResult>>,
 }
 
@@ -3369,6 +3377,7 @@ impl RpcRequestTransactionWorkRequest {
         slot: Slot,
         block_time: Option<UnixTimestamp>,
         bytes: Vec<u8>,
+        index: u32,
     ) -> (Arc<State>, WorkRequest, oneshot::Receiver<RpcRequestResult>) {
         let (tx, rx) = oneshot::channel();
         let this = Self {
@@ -3379,6 +3388,7 @@ impl RpcRequestTransactionWorkRequest {
             slot,
             block_time,
             bytes,
+            index,
             tx: Some(tx),
         };
         (request.state, WorkRequest::Transaction(this), rx)
@@ -3391,6 +3401,7 @@ impl RpcRequestTransactionWorkRequest {
                 self.bytes,
                 self.slot,
                 self.block_time,
+                self.index,
                 self.id,
                 self.encoding,
                 self.max_supported_transaction_version,
@@ -3408,6 +3419,7 @@ impl RpcRequestTransactionWorkRequest {
         bytes: Vec<u8>,
         slot: Slot,
         block_time: Option<UnixTimestamp>,
+        index: u32,
         id: Id<'static>,
         encoding: UiTransactionEncoding,
         max_supported_transaction_version: Option<u8>,
@@ -3436,6 +3448,7 @@ impl RpcRequestTransactionWorkRequest {
             slot,
             tx_with_meta,
             block_time,
+            index,
         };
         let tx = match confirmed_tx.encode(encoding, max_supported_transaction_version) {
             Ok(tx) => tx,
@@ -3505,7 +3518,7 @@ impl RpcRequestHandler for RpcRequestVersion {
             request.id,
             json!(RpcVersionInfo {
                 solana_core: version.to_string(),
-                feature_set: Some(version.feature_set),
+                feature_set: Some(version.feature_set()),
             }),
         ))
     }

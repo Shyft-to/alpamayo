@@ -28,6 +28,7 @@ pub struct BlockTransactionOffset {
     pub offset: u64,
     pub size: u64,
     pub err: Option<TransactionError>,
+    pub index: u32,
 }
 
 #[derive(Debug)]
@@ -180,6 +181,7 @@ impl ConfirmedBlockProtoRef<'_> {
                 offset,
                 size: tx.protobuf.len() as u64,
                 err: tx.err.clone(),
+                index: tx.index,
             });
         }
         for reward in self.rewards {
@@ -255,9 +257,8 @@ impl Deref for RewardWrapper<'_> {
 }
 
 impl Message for RewardWrapper<'_> {
-    fn encode_raw<B>(&self, buf: &mut B)
+    fn encode_raw(&self, buf: &mut impl BufMut)
     where
-        B: BufMut,
         Self: Sized,
     {
         if !self.pubkey.is_empty() {
@@ -274,6 +275,9 @@ impl Message for RewardWrapper<'_> {
         }
         if let Some(commission) = self.commission {
             bytes_encode(5, u8_to_static_str(commission).as_ref(), buf);
+        }
+        if let Some(commission_bps) = self.commission_bps {
+            bytes_encode(6, commission_bps.to_string().as_ref(), buf);
         }
     }
 
@@ -296,6 +300,8 @@ impl Message for RewardWrapper<'_> {
             0
         } + self.commission.map_or(0, |commission| {
             bytes_encoded_len(5, u8_to_static_str(commission).as_ref())
+        }) + self.commission_bps.map_or(0, |commission_bps| {
+            bytes_encoded_len(6, commission_bps.to_string().as_ref())
         })
     }
 
@@ -303,15 +309,14 @@ impl Message for RewardWrapper<'_> {
         unimplemented!()
     }
 
-    fn merge_field<B>(
+    fn merge_field(
         &mut self,
         _tag: u32,
         _wire_type: WireType,
-        _buf: &mut B,
+        _buf: &mut impl Buf,
         _ctx: DecodeContext,
     ) -> Result<(), DecodeError>
     where
-        B: Buf,
         Self: Sized,
     {
         unimplemented!()
@@ -325,6 +330,7 @@ const fn reward_type_as_i32(reward_type: Option<RewardType>) -> i32 {
         Some(RewardType::Rent) => 2,
         Some(RewardType::Staking) => 3,
         Some(RewardType::Voting) => 4,
+        Some(RewardType::DeactivatedStake) => 5,
     }
 }
 

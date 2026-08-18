@@ -379,6 +379,7 @@ impl State {
                 slot,
                 block_time: _,
                 bytes,
+                index: _,
             } => (slot, bytes),
             ReadResultTransaction::ReadError(error) => anyhow::bail!("read error: {error}"),
         };
