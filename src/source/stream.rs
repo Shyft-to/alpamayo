@@ -252,6 +252,7 @@ impl StreamSource {
             transactions_status: hashmap! {},
             blocks: hashmap! {},
             blocks_meta: hashmap! { "".to_owned() => SubscribeRequestFilterBlocksMeta::default() },
+            block_footer: hashmap! {},
             entry: hashmap! {},
             commitment: Some(CommitmentLevelProto::Processed as i32),
             accounts_data_slice: vec![],
@@ -409,6 +410,7 @@ impl Stream for StreamSource {
                     Some(UpdateOneof::Transaction(SubscribeUpdateTransaction {
                         transaction,
                         slot,
+                        ..
                     })) => match transaction {
                         Some(tx) => {
                             let first_processed = this.first_processed;
