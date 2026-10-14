@@ -478,6 +478,12 @@ impl Stream for StreamSource {
                         }
                     }
                     Some(UpdateOneof::Entry(_)) => Err(RecvError::UnexpectedMessage("Entry")),
+                    Some(UpdateOneof::BlockFooter(_)) => {
+                        Err(RecvError::UnexpectedMessage("BlockFooter"))
+                    }
+                    Some(UpdateOneof::EntryUpdateParent(_)) => {
+                        Err(RecvError::UnexpectedMessage("EntryUpdateParent"))
+                    }
                     None => Err(RecvError::MissedField("update_oneof")),
                 },
                 Some(Err(error)) => Err(error.into()),
