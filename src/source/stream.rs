@@ -252,6 +252,7 @@ impl StreamSource {
             transactions_status: hashmap! {},
             blocks: hashmap! {},
             blocks_meta: hashmap! { "".to_owned() => SubscribeRequestFilterBlocksMeta::default() },
+            block_footer: hashmap! {},
             entry: hashmap! {},
             commitment: Some(CommitmentLevelProto::Processed as i32),
             accounts_data_slice: vec![],
@@ -409,6 +410,7 @@ impl Stream for StreamSource {
                     Some(UpdateOneof::Transaction(SubscribeUpdateTransaction {
                         transaction,
                         slot,
+                        ..
                     })) => match transaction {
                         Some(tx) => {
                             let first_processed = this.first_processed;
@@ -476,6 +478,12 @@ impl Stream for StreamSource {
                         }
                     }
                     Some(UpdateOneof::Entry(_)) => Err(RecvError::UnexpectedMessage("Entry")),
+                    Some(UpdateOneof::BlockFooter(_)) => {
+                        Err(RecvError::UnexpectedMessage("BlockFooter"))
+                    }
+                    Some(UpdateOneof::EntryUpdateParent(_)) => {
+                        Err(RecvError::UnexpectedMessage("EntryUpdateParent"))
+                    }
                     None => Err(RecvError::MissedField("update_oneof")),
                 },
                 Some(Err(error)) => Err(error.into()),
