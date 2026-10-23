@@ -88,6 +88,16 @@ pub enum BlockDecodeError {
     FailedTransactionReturnData,
 }
 
+/// Drop the request URL from reqwest errors, it can contain credentials
+fn strip_url(mut error: ClientError) -> ClientError {
+    let kind = std::mem::replace(error.kind.as_mut(), ClientErrorKind::Custom(String::new()));
+    *error.kind = match kind {
+        ClientErrorKind::Reqwest(e) => ClientErrorKind::Reqwest(e.without_url()),
+        kind => kind,
+    };
+    error
+}
+
 pub struct HttpSource {
     httpurl: Option<(Url, Client)>,
     client: RpcClient,
@@ -122,7 +132,7 @@ impl HttpSource {
         let sender = HttpSender::new_with_client(config.rpc, rpc_client);
         let client = RpcClient::new_sender(sender, RpcClientConfig::default());
 
-        let version = client.get_version().await?;
+        let version = client.get_version().await.map_err(strip_url)?;
         info!(version = version.solana_core, "connected to RPC");
 
         Ok(Self {
@@ -137,16 +147,21 @@ impl HttpSource {
         self.client
             .get_slot_with_commitment(CommitmentConfig::confirmed())
             .await
+            .map_err(strip_url)
     }
 
     pub async fn get_finalized_slot(&self) -> Result<Slot, ClientError> {
         self.client
             .get_slot_with_commitment(CommitmentConfig::finalized())
             .await
+            .map_err(strip_url)
     }
 
     pub async fn get_first_available_block(&self) -> Result<Slot, ClientError> {
-        self.client.get_first_available_block().await
+        self.client
+            .get_first_available_block()
+            .await
+            .map_err(strip_url)
     }
 
     pub async fn get_block(
@@ -237,7 +252,7 @@ impl HttpSource {
                     }) => {
                         return Err(GetBlockError::SlotSkipped(slot));
                     }
-                    _ => return Err(error.into()),
+                    _ => return Err(strip_url(error).into()),
                 }
             }
         };
