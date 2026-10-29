@@ -9,6 +9,7 @@ use {
             read::{ReadRequest, ReadResultBlock, ReadResultTransaction},
             slots::StoredSlots,
         },
+        util::tokens_match,
         version::VERSION,
     },
     futures::future::BoxFuture,
@@ -45,14 +46,6 @@ use {
 #[derive(Debug, Deserialize)]
 struct SetHealthRequest {
     enabled: bool,
-}
-
-fn tokens_match(a: &str, b: &str) -> bool {
-    a.len() == b.len()
-        && a.bytes()
-            .zip(b.bytes())
-            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-            == 0
 }
 
 fn response_401() -> HttpResult<RpcResponse> {

@@ -60,17 +60,20 @@ pub struct ConfigLogs {
     pub json: bool,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ConfigMetrics {
     /// Endpoint of Prometheus service
     pub endpoint: SocketAddr,
+    /// Bearer token required for `/metrics`. Open if unset. `/health` and `/ready` always open.
+    pub token: Option<String>,
 }
 
 impl Default for ConfigMetrics {
     fn default() -> Self {
         Self {
             endpoint: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8001),
+            token: None,
         }
     }
 }

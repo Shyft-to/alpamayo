@@ -1,13 +1,28 @@
 use {
-    crate::{config::ConfigMetrics, storage::slots::StoredSlots, version::VERSION as VERSION_INFO},
+    crate::{
+        config::ConfigMetrics, storage::slots::StoredSlots, util::tokens_match,
+        version::VERSION as VERSION_INFO,
+    },
     anyhow::Context,
+    http_body_util::Full as BodyFull,
+    hyper::{
+        Request, Response, StatusCode,
+        body::{Bytes, Incoming as BodyIncoming},
+        header::{AUTHORIZATION, WWW_AUTHENTICATE},
+        service::service_fn,
+    },
+    hyper_util::{
+        rt::tokio::{TokioExecutor, TokioIo},
+        server::conn::auto::Builder as ServerBuilder,
+    },
     metrics::{counter, describe_counter, describe_gauge, describe_histogram},
     metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle},
     richat_shared::jsonrpc::metrics::{
         RPC_REQUESTS_DURATION_SECONDS, describe as describe_jsonrpc_metrics,
     },
-    std::{future::Future, time::Duration},
-    tokio::{task::JoinError, time::sleep},
+    std::{future::Future, sync::Arc, time::Duration},
+    tokio::{net::TcpListener, task::JoinError, time::sleep},
+    tracing::{error, info},
 };
 
 pub const SOURCE_GRPC_VERSION: &str = "source_grpc_version"; // hostname
@@ -107,7 +122,7 @@ pub fn setup() -> anyhow::Result<PrometheusHandle> {
 }
 
 pub async fn spawn_server(
-    config: ConfigMetrics,
+    ConfigMetrics { endpoint, token }: ConfigMetrics,
     handle: PrometheusHandle,
     stored_slots: StoredSlots,
     shutdown: impl Future<Output = ()> + Send + 'static,
@@ -120,15 +135,71 @@ pub async fn spawn_server(
         }
     });
 
-    richat_metrics::spawn_server(
-        richat_metrics::ConfigMetrics {
-            endpoint: config.endpoint,
-        },
-        move || handle.render().into_bytes(), // metrics
-        || true,                              // health
-        move || stored_slots.is_ready(),      // ready
-        shutdown,
-    )
-    .await
-    .map_err(Into::into)
+    let listener = TcpListener::bind(endpoint)
+        .await
+        .with_context(|| format!("failed to bind metrics server at {endpoint}"))?;
+    info!("start metrics server at: {endpoint}");
+
+    let token: Option<Arc<str>> = token.map(Into::into);
+    Ok(tokio::spawn(async move {
+        tokio::pin!(shutdown);
+        loop {
+            let stream = tokio::select! {
+                maybe_conn = listener.accept() => match maybe_conn {
+                    Ok((stream, _addr)) => stream,
+                    Err(error) => {
+                        error!("failed to accept new connection: {error}");
+                        break;
+                    }
+                },
+                () = &mut shutdown => {
+                    info!("metrics server shutdown");
+                    break;
+                }
+            };
+
+            let handle = handle.clone();
+            let stored_slots = stored_slots.clone();
+            let token = token.clone();
+            tokio::spawn(async move {
+                let service = service_fn(move |req: Request<BodyIncoming>| {
+                    let (status, body) = match req.uri().path() {
+                        "/health" => (StatusCode::OK, Bytes::from("OK")),
+                        "/ready" if stored_slots.is_ready() => (StatusCode::OK, Bytes::from("OK")),
+                        "/ready" => (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Bytes::from("Service is not ready"),
+                        ),
+                        "/metrics" if is_authorized(&req, token.as_deref()) => {
+                            (StatusCode::OK, Bytes::from(handle.render()))
+                        }
+                        "/metrics" => (StatusCode::UNAUTHORIZED, Bytes::new()),
+                        _ => (StatusCode::NOT_FOUND, Bytes::new()),
+                    };
+                    let mut builder = Response::builder().status(status);
+                    if status == StatusCode::UNAUTHORIZED {
+                        builder = builder.header(WWW_AUTHENTICATE, "Bearer");
+                    }
+                    std::future::ready(builder.body(BodyFull::new(body)))
+                });
+                if let Err(error) = ServerBuilder::new(TokioExecutor::new())
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await
+                {
+                    error!("failed to handle metrics request: {error}");
+                }
+            });
+        }
+    }))
+}
+
+fn is_authorized(req: &Request<BodyIncoming>, token: Option<&str>) -> bool {
+    let Some(token) = token else {
+        return true;
+    };
+    req.headers()
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|value| tokens_match(value, token))
 }
