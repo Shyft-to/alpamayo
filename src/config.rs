@@ -43,14 +43,18 @@ pub struct Config {
 impl Config {
     pub fn load_from_file<P: AsRef<Path>>(file: P) -> anyhow::Result<Self> {
         let config = read_to_string_sync(&file)?;
-        if matches!(
+        let mut config: Self = if matches!(
             file.as_ref().extension().and_then(|e| e.to_str()),
             Some("yml") | Some("yaml")
         ) {
-            serde_yaml::from_str(&config).map_err(Into::into)
+            serde_yaml::from_str(&config)?
         } else {
-            json5::from_str(&config).map_err(Into::into)
+            json5::from_str(&config)?
+        };
+        if config.metrics.token.is_none() {
+            config.metrics.token = config.rpc.admin_token.clone();
         }
+        Ok(config)
     }
 }
 
@@ -65,7 +69,8 @@ pub struct ConfigLogs {
 pub struct ConfigMetrics {
     /// Endpoint of Prometheus service
     pub endpoint: SocketAddr,
-    /// Bearer token required for `/metrics`. Open if unset. `/health` and `/ready` always open.
+    /// Bearer token required for `/metrics`, falls back to `rpc.admin_token`. Open if both unset.
+    /// `/health` and `/ready` always open.
     pub token: Option<String>,
 }
 
