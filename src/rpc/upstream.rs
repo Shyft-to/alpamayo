@@ -19,7 +19,9 @@ use {
     quanta::Instant as QInstant,
     reqwest::{Client, StatusCode, Version, header::CONTENT_TYPE},
     richat_metrics::duration_to_seconds,
-    richat_shared::jsonrpc::helpers::{RpcResponse, X_SUBSCRIPTION_ID, jsonrpc_response_success},
+    richat_shared::jsonrpc::helpers::{
+        RpcResponse, X_SUBSCRIPTION_ID, jsonrpc_response_error_custom, jsonrpc_response_success,
+    },
     serde::de::DeserializeOwned,
     serde_json::json,
     solana_clock::{Epoch, Slot},
@@ -30,6 +32,7 @@ use {
             RpcBlockConfig, RpcLeaderScheduleConfig, RpcLeaderScheduleConfigWrapper,
             RpcSignatureStatusConfig, RpcSignaturesForAddressConfig, RpcTransactionConfig,
         },
+        custom_error::RpcCustomError,
         response::{RpcContactInfo, RpcLeaderSchedule},
     },
     solana_signature::Signature,
@@ -584,10 +587,19 @@ impl RpcClientJsonrpc {
         epoch: Epoch,
         slot: Slot,
         is_processed: bool,
-        identity: Option<String>,
+        config: RpcLeaderScheduleConfig,
         reason: &'static str,
     ) -> RpcClientJsonrpcResult {
-        if is_processed {
+        // shared epoch cache only holds identity-keyed schedules
+        if is_processed || config.key_by_vote_account == Some(true) {
+            let config = if is_processed {
+                RpcLeaderScheduleConfig {
+                    commitment: Some(CommitmentConfig::processed()),
+                    ..config
+                }
+            } else {
+                config
+            };
             return self
                 .inner
                 .call_with_timeout(
@@ -599,7 +611,7 @@ impl RpcClientJsonrpc {
                         "id": id,
                         "params": [
                             RpcLeaderScheduleConfigWrapper::SlotOnly(Some(slot)),
-                            RpcLeaderScheduleConfig { identity, commitment: Some(CommitmentConfig::processed()) }
+                            config
                         ]
                     })
                     .to_string(),
@@ -632,7 +644,8 @@ impl RpcClientJsonrpc {
                                 RpcLeaderScheduleConfigWrapper::SlotOnly(Some(slot)),
                                 RpcLeaderScheduleConfig {
                                     identity: None,
-                                    commitment: Some(CommitmentConfig::confirmed())
+                                    commitment: Some(CommitmentConfig::confirmed()),
+                                    ..Default::default()
                                 }
                             ]),
                             deadline,
@@ -650,7 +663,7 @@ impl RpcClientJsonrpc {
 
         let payload = request.await.map_err(|error| anyhow::anyhow!(error))?;
 
-        if let Some(identity) = identity {
+        if let Some(identity) = config.identity {
             let Some(map) = payload.as_ref() else {
                 return Ok(jsonrpc_response_success(id, serde_json::Value::Null));
             };
@@ -661,7 +674,10 @@ impl RpcClientJsonrpc {
                     json!({ identity.to_string(): slots }),
                 ))
             } else {
-                Ok(jsonrpc_response_success(id, json!({})))
+                Ok(jsonrpc_response_error_custom(
+                    id,
+                    RpcCustomError::LeaderScheduleIdentityNotFound { identity },
+                ))
             }
         } else {
             Ok(jsonrpc_response_success(id, payload.as_ref().clone()))
@@ -712,6 +728,7 @@ impl RpcClientJsonrpc {
         deadline: Instant,
         id: &Id<'static>,
         signatures: Vec<&Signature>,
+        config: RpcSignatureStatusConfig,
         reason: &'static str,
     ) -> RpcClientJsonrpcResult {
         let signatures = signatures.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -723,9 +740,7 @@ impl RpcClientJsonrpc {
                     "jsonrpc": "2.0",
                     "method": "getSignatureStatuses",
                     "id": id,
-                    "params": [signatures, RpcSignatureStatusConfig {
-                        search_transaction_history: true
-                    }]
+                    "params": [signatures, config]
                 })
                 .to_string(),
                 deadline,
@@ -746,6 +761,7 @@ impl RpcClientJsonrpc {
         commitment: CommitmentConfig,
         encoding: UiTransactionEncoding,
         max_supported_transaction_version: Option<u8>,
+        min_context_slot: Option<Slot>,
         reason: &'static str,
     ) -> RpcClientJsonrpcResult {
         self.inner
@@ -760,6 +776,7 @@ impl RpcClientJsonrpc {
                         encoding: Some(encoding),
                         commitment: Some(commitment),
                         max_supported_transaction_version,
+                        min_context_slot,
                     }]
                 })
                 .to_string(),
