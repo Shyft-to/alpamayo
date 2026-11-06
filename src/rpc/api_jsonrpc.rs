@@ -1865,7 +1865,7 @@ struct RpcRequestLeaderSchedule {
     id: Id<'static>,
     slot: Slot,
     is_processed: bool,
-    identity: Option<String>,
+    config: RpcLeaderScheduleConfig,
 }
 
 impl RpcRequestHandler for RpcRequestLeaderSchedule {
@@ -1917,7 +1917,7 @@ impl RpcRequestHandler for RpcRequestLeaderSchedule {
             id: id.into_owned(),
             slot,
             is_processed,
-            identity: config.identity,
+            config,
         })
     }
 
@@ -1940,7 +1940,7 @@ impl RpcRequestHandler for RpcRequestLeaderSchedule {
                 epoch,
                 self.slot,
                 self.is_processed,
-                self.identity,
+                self.config,
                 REASON_ALWAYS,
             )
             .await
@@ -2997,6 +2997,8 @@ struct RpcRequestSignatureStatuses {
     id: Id<'static>,
     signatures: Vec<Signature>,
     search_transaction_history: bool,
+    commitment: CommitmentConfig,
+    config: RpcSignatureStatusConfig,
 }
 
 impl RpcRequestHandler for RpcRequestSignatureStatuses {
@@ -3040,9 +3042,8 @@ impl RpcRequestHandler for RpcRequestSignatureStatuses {
             }
         }
 
-        let search_transaction_history = config
-            .map(|x| x.search_transaction_history)
-            .unwrap_or(false);
+        let config = config.unwrap_or_default();
+        let search_transaction_history = config.search_transaction_history;
 
         if search_transaction_history && !state.gss_transaction_history {
             return Err(jsonrpc_response_error_custom(
@@ -3051,6 +3052,12 @@ impl RpcRequestHandler for RpcRequestSignatureStatuses {
             ));
         }
 
+        // agave defaults getSignatureStatuses to processed
+        let commitment = config
+            .commitment
+            .unwrap_or_else(CommitmentConfig::processed);
+        let (id, _slot) = min_context_check(id, config.min_context_slot, commitment, &state)?;
+
         Ok(Self {
             state,
             x_subscription_id,
@@ -3058,6 +3065,8 @@ impl RpcRequestHandler for RpcRequestSignatureStatuses {
             id: id.into_owned(),
             signatures,
             search_transaction_history,
+            commitment,
+            config,
         })
     }
 
@@ -3091,6 +3100,16 @@ impl RpcRequestHandler for RpcRequestSignatureStatuses {
             }
         };
 
+        // hide statuses not yet at requested commitment (agave reads from bank at that commitment)
+        for status in statuses.iter_mut() {
+            if status
+                .as_ref()
+                .is_some_and(|status| !status.satisfies_commitment(self.commitment))
+            {
+                *status = None;
+            }
+        }
+
         if self.search_transaction_history
             && !self.upstream_disabled
             && self
@@ -3121,8 +3140,13 @@ impl RpcRequestHandler for RpcRequestSignatureStatuses {
             }
         }
 
+        let context_slot = match self.commitment.commitment {
+            CommitmentLevel::Processed => self.state.stored_slots.processed_load(),
+            CommitmentLevel::Confirmed => self.state.stored_slots.confirmed_load(),
+            CommitmentLevel::Finalized => self.state.stored_slots.finalized_load(),
+        };
         let response = RpcResponse {
-            context: RpcResponseContext::new(self.state.stored_slots.processed_load()),
+            context: RpcResponseContext::new(context_slot),
             value: statuses,
         };
         Ok(jsonrpc_response_success(self.id, &response))
@@ -3145,6 +3169,7 @@ impl RpcRequestSignatureStatuses {
                     deadline,
                     &self.id,
                     signatures,
+                    self.config,
                     REASON_MISSING_STATUS,
                 )
                 .await?;
@@ -3223,6 +3248,7 @@ struct RpcRequestTransaction {
     commitment: CommitmentConfig,
     encoding: UiTransactionEncoding,
     max_supported_transaction_version: Option<u8>,
+    min_context_slot: Option<Slot>,
 }
 
 impl RpcRequestHandler for RpcRequestTransaction {
@@ -3261,6 +3287,7 @@ impl RpcRequestHandler for RpcRequestTransaction {
         if let Err(error) = check_is_at_least_confirmed(commitment) {
             return Err(jsonrpc_response_error(id, error));
         }
+        let (id, _slot) = min_context_check(id, config.min_context_slot, commitment, &state)?;
 
         Ok(Self {
             state,
@@ -3271,6 +3298,7 @@ impl RpcRequestHandler for RpcRequestTransaction {
             commitment,
             encoding,
             max_supported_transaction_version,
+            min_context_slot: config.min_context_slot,
         })
     }
 
@@ -3346,6 +3374,7 @@ impl RpcRequestTransaction {
                     self.commitment,
                     self.encoding,
                     self.max_supported_transaction_version,
+                    self.min_context_slot,
                     reason,
                 )
                 .await
